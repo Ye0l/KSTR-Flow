@@ -267,3 +267,61 @@ class FlowRegistry:
         if not candidates:
             raise NameError(f"Unknown ComfyUI node: {name}")
         raise NameError(f"Ambiguous ComfyUI node name: {name}; import its pack namespace")
+
+
+def collect_comfy_object_info() -> dict[str, dict]:
+    """Collect `/object_info`-equivalent metadata inside a running ComfyUI process.
+
+    This avoids an HTTP round-trip to the same ComfyUI server and supports both
+    V1 nodes and V3 schema nodes.
+    """
+    import nodes
+
+    result: dict[str, dict] = {}
+    for node_id, obj_class in nodes.NODE_CLASS_MAPPINGS.items():
+        try:
+            if hasattr(obj_class, "GET_NODE_INFO_V1"):
+                info = obj_class.GET_NODE_INFO_V1()
+            else:
+                inputs = obj_class.INPUT_TYPES()
+                info = {
+                    "input": inputs,
+                    "input_order": {key: list(value.keys()) for key, value in inputs.items()},
+                    "is_input_list": getattr(obj_class, "INPUT_IS_LIST", False),
+                    "output": list(obj_class.RETURN_TYPES),
+                    "output_is_list": list(getattr(obj_class, "OUTPUT_IS_LIST", [False] * len(obj_class.RETURN_TYPES))),
+                    "output_name": list(getattr(obj_class, "RETURN_NAMES", obj_class.RETURN_TYPES)),
+                    "name": node_id,
+                    "display_name": nodes.NODE_DISPLAY_NAME_MAPPINGS.get(node_id, node_id),
+                    "description": getattr(obj_class, "DESCRIPTION", ""),
+                    "python_module": getattr(obj_class, "RELATIVE_PYTHON_MODULE", "nodes"),
+                    "category": getattr(obj_class, "CATEGORY", "sd"),
+                    "output_node": bool(getattr(obj_class, "OUTPUT_NODE", False)),
+                    "has_intermediate_output": bool(getattr(obj_class, "HAS_INTERMEDIATE_OUTPUT", False)),
+                    "search_aliases": list(getattr(obj_class, "SEARCH_ALIASES", [])),
+                }
+                if getattr(obj_class, "DEPRECATED", False):
+                    info["deprecated"] = True
+                if getattr(obj_class, "EXPERIMENTAL", False):
+                    info["experimental"] = True
+                if getattr(obj_class, "DEV_ONLY", False):
+                    info["dev_only"] = True
+            info = dict(info)
+            info.setdefault("name", node_id)
+            info.setdefault("python_module", getattr(obj_class, "RELATIVE_PYTHON_MODULE", "nodes"))
+            result[node_id] = info
+        except Exception:
+            # Match ComfyUI's /object_info behavior: one broken node should not make
+            # the entire registry unusable.
+            continue
+    return result
+
+
+_runtime_registry: FlowRegistry | None = None
+
+
+def get_runtime_registry(*, refresh: bool = False) -> FlowRegistry:
+    global _runtime_registry
+    if refresh or _runtime_registry is None:
+        _runtime_registry = FlowRegistry.from_object_info(collect_comfy_object_info())
+    return _runtime_registry

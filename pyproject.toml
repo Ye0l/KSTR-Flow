@@ -117,7 +117,7 @@ Issues = "https://github.com/Ye0l/KSTR-Flow/issues"
 
 [project.entry-points."comfyui.custom_nodes"]
 # https://github.com/comfyanonymous/ComfyUI/pull/298
-kstr_flow = "comfy_script.nodes"
+kstr_flow = "kstr_flow.comfy_node"
 
 [build-system]
 requires = ["hatchling"]

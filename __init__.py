@@ -1,41 +1,25 @@
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
-
-success = True
+from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-if sys.version_info < (3, 9):
-    success = False
-    print('\033[34mComfyScript: \033[91mPython 3.9+ is required.\033[0m')
+if sys.version_info < (3, 10):
+    raise RuntimeError("KSTR Flow requires Python 3.10+")
 
 root = Path(__file__).resolve().parent
+src = root / "src"
+if str(src) not in sys.path:
+    sys.path.insert(0, str(src))
 
-sys.path.insert(0, str(root / 'src'))
-import comfy_script.nodes
-from comfy_script.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-success &= comfy_script.nodes.success
+WEB_DIRECTORY = "./src/kstr_flow/web"
 
-# Load comfyui-legacy custom nodes
-import importlib.metadata
-import importlib.util
-import traceback
-
+# Pytest/build tools import the repository package outside ComfyUI. Register the
+# actual extension only when ComfyUI's server/runtime modules are present.
 try:
-    import nodes
+    import server as _comfy_server  # noqa: F401,E402
+    import comfy_api as _comfy_api  # noqa: F401,E402
 except ModuleNotFoundError:
-    # Allow importing/testing KSTR Flow as a normal Python package without a
-    # full ComfyUI checkout. ComfyUI provides this module at extension load.
-    nodes = None
-
-if nodes is not None:
-    for entry_point in importlib.metadata.entry_points(group='comfyui_legacy.custom_nodes'):
-        try:
-            spec = importlib.util.find_spec(entry_point.module)
-            nodes.load_custom_node(spec.submodule_search_locations[0])
-        except Exception as e:
-            print(f'KSTR Flow: Failed to load legacy custom nodes from {entry_point}: {e}')
-            traceback.print_exc()
-
-if success:
-    print('\033[34mComfyScript: \033[92mLoaded\033[0m')
+    __all__ = ["WEB_DIRECTORY"]
+else:
+    from kstr_flow.comfy_node import KSTRFlowExtension, comfy_entrypoint  # noqa: E402
+    __all__ = ["KSTRFlowExtension", "WEB_DIRECTORY", "comfy_entrypoint"]

@@ -41,9 +41,18 @@ def _literal_default(node: ast.expr) -> Any:
 
 def _return_ports(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[FlowPort, ...]:
     if fn.returns is not None:
-        if isinstance(fn.returns, ast.Tuple):
-            return tuple(FlowPort(f"output_{i}", _annotation_name(t)) for i, t in enumerate(fn.returns.elts))
-        return (FlowPort("output", _annotation_name(fn.returns)),)
+        return_ann = fn.returns
+        if isinstance(return_ann, ast.Tuple):
+            return tuple(FlowPort(f"output_{i}", _annotation_name(t)) for i, t in enumerate(return_ann.elts))
+        # Python's normal multi-output annotation is tuple[IMAGE, MASK].
+        if (
+            isinstance(return_ann, ast.Subscript)
+            and isinstance(return_ann.value, ast.Name)
+            and return_ann.value.id in {"tuple", "Tuple"}
+            and isinstance(return_ann.slice, ast.Tuple)
+        ):
+            return tuple(FlowPort(f"output_{i}", _annotation_name(t)) for i, t in enumerate(return_ann.slice.elts))
+        return (FlowPort("output", _annotation_name(return_ann)),)
 
     signatures: list[tuple[str, ...]] = []
     for node in ast.walk(fn):
