@@ -42,3 +42,20 @@ def workflow(image: IMAGE, prompt: STRING = "1girl") -> IMAGE:
     assert "CLIPTextEncode" in class_types
     assert "FaceDetailer" in class_types
     assert any(edge["to_input"] == "image" for edge in graph["edges"])
+
+
+def test_analyze_infers_node_output_symbols(registry):
+    source = '''
+import comfy
+
+def workflow(prompt: STRING) -> IMAGE:
+    model, clip, vae = comfy.CheckpointLoaderSimple("model.safetensors")
+    cond = comfy.CLIPTextEncode(prompt, clip)
+    return cond
+'''
+    result = analyze_source(source, registry)
+    assert result["symbols"]["prompt"]["type"] == "STRING"
+    assert result["symbols"]["model"]["type"] == "MODEL"
+    assert result["symbols"]["clip"]["type"] == "CLIP"
+    assert result["symbols"]["vae"]["type"] == "VAE"
+    assert result["symbols"]["cond"]["type"] == "CONDITIONING"

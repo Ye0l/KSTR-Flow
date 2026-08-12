@@ -4,19 +4,23 @@ import { api } from "../../scripts/api.js";
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { python } from "@codemirror/lang-python";
-import { bracketMatching, indentOnInput } from "@codemirror/language";
+import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { setDiagnostics } from "@codemirror/lint";
 import { searchKeymap } from "@codemirror/search";
 import { EditorState, Prec } from "@codemirror/state";
 import {
+  Decoration,
   EditorView,
+  ViewPlugin,
   drawSelection,
   dropCursor,
   highlightActiveLine,
   highlightActiveLineGutter,
+  hoverTooltip,
   keymap,
   lineNumbers,
 } from "@codemirror/view";
+import { tags } from "@lezer/highlight";
 
 const FLOW_CLASS = "KSTRFlow";
 const STATE = Symbol("kstrFlowState");
@@ -126,8 +130,11 @@ function signatureText(nodeInfo) {
     const suffix = input.optional ? "?" : "";
     return `${input.name}: ${input.type}${suffix}`;
   }).join(", ");
-  const outputs = (nodeInfo.outputs ?? []).map((output) => output.type).join(", ") || "None";
-  return `(${args}) → ${outputs}`;
+  const outputList = nodeInfo.outputs ?? [];
+  const outputs = outputList.length
+    ? outputList.map((output) => output.name && output.name !== output.type ? `${output.name}: ${output.type}` : output.type).join(", ")
+    : "None";
+  return `(${args}) → ${outputList.length > 1 ? `(${outputs})` : outputs}`;
 }
 
 function makeNodeCompletion(nodeInfo) {
@@ -311,7 +318,11 @@ async function kstrCompletion(context) {
         label: `${input.name}=`,
         type: "property",
         detail: `${input.type}${input.optional ? " optional" : ""}${input.has_default ? ` = ${JSON.stringify(input.default)}` : ""}`,
-        info: input.tooltip || (input.options?.length ? input.options.join("\n") : ""),
+        info: [
+          input.tooltip,
+          input.option_count ? `${input.option_count} available values` : null,
+          input.options?.length ? input.options.slice(0, 24).join("\n") : null,
+        ].filter(Boolean).join("\n\n"),
         apply: `${input.name}=`,
       }));
     if (options.length) return { from: word.from, options };
@@ -335,6 +346,190 @@ async function kstrCompletion(context) {
   };
 }
 
+
+const kstrHighlightStyle = HighlightStyle.define([
+  { tag: tags.keyword, color: "#c792ea", fontWeight: "600" },
+  { tag: [tags.string, tags.special(tags.string)], color: "#c3e88d" },
+  { tag: [tags.number, tags.bool, tags.null], color: "#f78c6c" },
+  { tag: tags.comment, color: "#6f7d8c", fontStyle: "italic" },
+  { tag: [tags.function(tags.variableName), tags.function(tags.propertyName)], color: "#82aaff" },
+  { tag: tags.typeName, color: "#ffcb6b" },
+  { tag: tags.propertyName, color: "#89ddff" },
+  { tag: [tags.operator, tags.punctuation], color: "#89a4b8" },
+  { tag: tags.variableName, color: "#e8e8e8" },
+]);
+
+function semanticDecorations(view) {
+  const text = view.state.doc.toString();
+  const ranges = [];
+  const seen = new Set();
+  const add = (from, to, className) => {
+    const key = `${from}:${to}:${className}`;
+    if (from >= to || seen.has(key)) return;
+    seen.add(key);
+    ranges.push(Decoration.mark({ class: className }).range(from, to));
+  };
+
+  for (const match of text.matchAll(/\b(global_seed|seed|random|math|nodes)\b/g)) {
+    add(match.index, match.index + match[0].length, "kstr-sem-reserved");
+  }
+  for (const match of text.matchAll(/\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*(?=\()/g)) {
+    add(match.index, match.index + match[1].length, "kstr-sem-namespace");
+    const memberStart = match.index + match[0].indexOf(match[2]);
+    add(memberStart, memberStart + match[2].length, "kstr-sem-node");
+  }
+  for (const match of text.matchAll(/\b(?:IMAGE|MODEL|CLIP|VAE|LATENT|CONDITIONING|MASK|SEGS|STRING|INT|FLOAT|BOOLEAN|BOOL|COMBO)\b/g)) {
+    add(match.index, match.index + match[0].length, "kstr-sem-type");
+  }
+
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  return Decoration.set(ranges, true);
+}
+
+const semanticPlugin = ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = semanticDecorations(view); }
+  update(update) {
+    if (update.docChanged || update.viewportChanged) this.decorations = semanticDecorations(update.view);
+  }
+}, { decorations: (value) => value.decorations });
+
+function wordRangeAt(doc, pos) {
+  const text = doc.toString();
+  let from = Math.max(0, Math.min(pos, text.length));
+  let to = from;
+  while (from > 0 && /[A-Za-z0-9_]/.test(text[from - 1])) from--;
+  while (to < text.length && /[A-Za-z0-9_]/.test(text[to])) to++;
+  if (from === to) return null;
+  return { from, to, word: text.slice(from, to) };
+}
+
+function findNodeInfo(registry, pack, callName) {
+  return registry.packs?.[pack]?.find((item) =>
+    item.name === callName || (item.call_name || item.name) === callName
+  ) ?? null;
+}
+
+function makeHoverDom(title, lines = [], description = "") {
+  const root = document.createElement("div");
+  root.className = "kstr-flow-hover";
+  Object.assign(root.style, {
+    maxWidth: "520px",
+    padding: "8px 10px",
+    color: "var(--fg-color, #e8e8e8)",
+    background: "var(--comfy-menu-bg, #202124)",
+    font: "11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    lineHeight: "1.45",
+  });
+  const heading = document.createElement("div");
+  heading.textContent = title;
+  Object.assign(heading.style, { fontWeight: "700", color: "#82aaff", marginBottom: "5px" });
+  root.append(heading);
+  for (const line of lines) {
+    const row = document.createElement("div");
+    row.textContent = line;
+    root.append(row);
+  }
+  if (description) {
+    const desc = document.createElement("div");
+    desc.textContent = description;
+    Object.assign(desc.style, { marginTop: "7px", opacity: ".72", whiteSpace: "pre-wrap", fontFamily: "ui-sans-serif, system-ui, sans-serif" });
+    root.append(desc);
+  }
+  return root;
+}
+
+function nodeHoverLines(nodeInfo) {
+  const inputs = (nodeInfo.inputs ?? []).map((input) => {
+    const flags = [input.optional ? "optional" : null, input.has_default ? `default=${JSON.stringify(input.default)}` : null].filter(Boolean);
+    return `  ${input.name}: ${input.type}${flags.length ? `  [${flags.join(", ")}]` : ""}`;
+  });
+  const outputs = (nodeInfo.outputs ?? []).map((output, index) =>
+    `  ${output.name || `output_${index}`}: ${output.type}`
+  );
+  return ["inputs:", ...(inputs.length ? inputs : ["  (none)"]), "returns:", ...(outputs.length ? outputs : ["  None"])];
+}
+
+async function kstrHover(state, view, pos) {
+  const range = wordRangeAt(view.state.doc, pos);
+  if (!range) return null;
+  let registry = state.registry;
+  if (!registry) {
+    try { registry = state.registry = await loadRegistry(); } catch { return null; }
+  }
+  const text = view.state.doc.toString();
+  const before = text.slice(0, range.from);
+  const member = before.match(/([A-Za-z_]\w*)\.\s*$/);
+  if (member) {
+    const alias = member[1];
+    const pack = importedAliases(text).get(alias) || alias;
+    const nodeInfo = findNodeInfo(registry, pack, range.word);
+    if (nodeInfo) {
+      return {
+        pos: range.from,
+        end: range.to,
+        above: true,
+        create: () => ({ dom: makeHoverDom(`${pack}.${nodeInfo.call_name || nodeInfo.name}`, nodeHoverLines(nodeInfo), nodeInfo.description || nodeInfo.display_name || "") }),
+      };
+    }
+  }
+
+  const call = findCallAtCursor(text.slice(0, range.from), registry);
+  if (call) {
+    const input = call.node.inputs?.find((item) => item.name === range.word);
+    if (input) {
+      const lines = [
+        `type: ${input.type}`,
+        input.optional ? "optional: yes" : "optional: no",
+        input.has_default ? `default: ${JSON.stringify(input.default)}` : null,
+        input.option_count ? `values: ${input.option_count} available` : null,
+      ].filter(Boolean);
+      return {
+        pos: range.from,
+        end: range.to,
+        above: true,
+        create: () => ({ dom: makeHoverDom(`${call.node.call_name || call.node.name}.${input.name}`, lines, input.tooltip || "") }),
+      };
+    }
+  }
+
+  const symbol = state.analysis?.symbols?.[range.word];
+  if (symbol) {
+    return {
+      pos: range.from,
+      end: range.to,
+      above: true,
+      create: () => ({ dom: makeHoverDom(range.word, [`type: ${symbol.type}`, `kind: ${symbol.kind || "variable"}`]) }),
+    };
+  }
+
+  if (RESERVED.includes(range.word)) {
+    return {
+      pos: range.from,
+      end: range.to,
+      above: true,
+      create: () => ({ dom: makeHoverDom(range.word, ["KSTR Flow runtime reserved value"]) }),
+    };
+  }
+
+  const after = text.slice(range.to);
+  if (/^\s*\(/.test(after)) {
+    const matches = [];
+    for (const [pack, nodes] of Object.entries(registry.packs ?? {})) {
+      for (const info of nodes) if ((info.call_name || info.name) === range.word || info.name === range.word) matches.push({ pack, info });
+    }
+    if (matches.length === 1) {
+      const { pack, info } = matches[0];
+      return {
+        pos: range.from,
+        end: range.to,
+        above: true,
+        create: () => ({ dom: makeHoverDom(`${pack}.${info.call_name || info.name}`, nodeHoverLines(info), info.description || "") }),
+      };
+    }
+  }
+  return null;
+}
+
 const editorTheme = EditorView.theme({
   "&": {
     height: "100%",
@@ -347,6 +542,10 @@ const editorTheme = EditorView.theme({
   ".cm-scroller": { overflow: "auto", minHeight: "0" },
   ".cm-gutters": { background: "transparent", border: "none", color: "#777" },
   ".cm-activeLine, .cm-activeLineGutter": { background: "rgba(127,127,127,.09)" },
+  ".kstr-sem-namespace": { color: "#89ddff", fontWeight: "600" },
+  ".kstr-sem-node": { color: "#82aaff", fontWeight: "600" },
+  ".kstr-sem-type": { color: "#ffcb6b", fontWeight: "600" },
+  ".kstr-sem-reserved": { color: "#f78c6c", fontWeight: "600" },
   ".cm-tooltip": {
     zIndex: "10000",
     background: "var(--comfy-menu-bg, #202124)",
@@ -921,6 +1120,9 @@ function install(node) {
       bracketMatching(),
       highlightActiveLine(),
       python(),
+      syntaxHighlighting(kstrHighlightStyle),
+      semanticPlugin,
+      hoverTooltip((view, pos) => kstrHover(state, view, pos), { hoverTime: 220, hideOnChange: true }),
       autocompletion({ override: [kstrCompletion], activateOnTyping: true, defaultKeymap: false }),
       Prec.highest(keymap.of(completionKeymap)),
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
