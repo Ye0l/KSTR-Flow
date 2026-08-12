@@ -5,6 +5,7 @@ from server import PromptServer
 
 from .analyze import analyze_source
 from .registry import get_runtime_registry
+from .naming import str_to_class_id
 
 
 @PromptServer.instance.routes.post("/kstr-flow/analyze")
@@ -58,6 +59,7 @@ async def kstr_flow_registry(request):
 
         packs.setdefault(meta.namespace, []).append({
             "name": raw_name,
+            "call_name": str_to_class_id(raw_name),
             "display_name": info.get("display_name") or raw_name,
             "description": info.get("description") or "",
             "category": info.get("category") or "",

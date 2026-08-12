@@ -33,7 +33,12 @@ def _identifier(value: str) -> str:
 
 def normalize_python_module(python_module: str | None) -> str:
     """Return the user-facing import namespace for a ComfyUI python_module."""
-    if not python_module or python_module == "nodes" or python_module.startswith("comfy_extras"):
+    if (
+        not python_module
+        or python_module == "nodes"
+        or python_module.startswith("comfy_extras")
+        or python_module.startswith("comfy_api")
+    ):
         return "comfy"
 
     module = python_module.replace("\\", "/")
@@ -47,6 +52,28 @@ def normalize_python_module(python_module: str | None) -> str:
     return _identifier(pack)
 
 
+def _module_pack_identity(python_module: str | None) -> tuple[str, str]:
+    """Return the logical package behind an implementation module."""
+    if (
+        not python_module
+        or python_module == "nodes"
+        or python_module.startswith("comfy_extras")
+        or python_module.startswith("comfy_api")
+    ):
+        return ("core", "comfy")
+
+    module = python_module.replace("\\", "/")
+    if module.startswith("custom_nodes."):
+        rest = module[len("custom_nodes.") :]
+        pack = re.split(r"[./]", rest, maxsplit=1)[0]
+        return ("custom", pack.lower())
+    if module.startswith("custom_nodes/"):
+        rest = module[len("custom_nodes/") :]
+        pack = re.split(r"[./]", rest, maxsplit=1)[0]
+        return ("custom", pack.lower())
+
+    root = re.split(r"[./]", module, maxsplit=1)[0]
+    return ("module", root.lower())
 
 
 _flow_call_collector: contextvars.ContextVar[list[NodeOutput] | None] = contextvars.ContextVar(
@@ -249,7 +276,7 @@ class FlowRegistry:
         return registry
 
     def load_object_info(self, object_info: dict[str, dict]) -> None:
-        modules: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+        packs: dict[tuple[str, str], list[tuple[str, dict, str]]] = defaultdict(list)
         for raw_name, original in object_info.items():
             info = dict(original)
             info.setdefault("name", raw_name)
@@ -264,24 +291,30 @@ class FlowRegistry:
             if not python_module and info.get("_cls") is not None:
                 python_module = getattr(info["_cls"], "__module__", "")
             python_module = python_module or "nodes"
-            modules[python_module].append((raw_name, info))
+            packs[_module_pack_identity(python_module)].append((raw_name, info, python_module))
 
-        # Resolve namespace collisions deterministically per source module.
-        used_aliases: dict[str, str] = {}
-        for python_module in sorted(modules):
-            base = normalize_python_module(python_module)
+        # Multiple implementation modules from one pack intentionally share one
+        # import namespace. Only genuinely distinct packs compete for aliases.
+        used_aliases: dict[str, tuple[str, str]] = {}
+        pack_aliases: dict[tuple[str, str], str] = {}
+        for identity in sorted(packs):
+            entries = packs[identity]
+            representative_module = entries[0][2]
+            base = normalize_python_module(representative_module)
             alias = base
             i = 2
-            while alias in used_aliases and used_aliases[alias] != python_module:
+            while alias in used_aliases and used_aliases[alias] != identity:
                 alias = f"{base}{i}"
                 i += 1
-            used_aliases[alias] = python_module
-            self._module_aliases[python_module] = alias
+            used_aliases[alias] = identity
+            pack_aliases[identity] = alias
             self.namespaces.setdefault(alias, NodeNamespace(alias))
+            for _, _, python_module in entries:
+                self._module_aliases[python_module] = alias
 
-        for python_module, entries in modules.items():
-            namespace = self._module_aliases[python_module]
-            for raw_name, info in entries:
+        for identity, entries in packs.items():
+            namespace = pack_aliases[identity]
+            for raw_name, info, python_module in entries:
                 node = FlowNode(info)
                 self.nodes[raw_name] = node
                 self.namespaces[namespace].add(raw_name, node)
@@ -349,7 +382,14 @@ def collect_comfy_object_info() -> dict[str, dict]:
                     info["dev_only"] = True
             info = dict(info)
             info.setdefault("name", node_id)
-            info.setdefault("python_module", getattr(obj_class, "RELATIVE_PYTHON_MODULE", "nodes"))
+            # ComfyUI's loader knows the actual origin pack. V3 schema metadata
+            # can report an implementation module such as comfy_api.*, which is
+            # not a useful user-facing namespace and may collapse custom packs.
+            relative_module = getattr(obj_class, "RELATIVE_PYTHON_MODULE", None)
+            if relative_module:
+                info["python_module"] = relative_module
+            else:
+                info.setdefault("python_module", "nodes")
             result[node_id] = info
         except Exception:
             # Match ComfyUI's /object_info behavior: one broken node should not make

@@ -26,3 +26,22 @@ def test_type_mismatch_is_rejected(registry):
     with pytest.raises(TypeError, match="expected 'CLIP'"):
         registry.namespace("comfy").CLIPTextEncode(text="x", clip=model)
     assert registry.namespace("comfy").CLIPTextEncode(text="x", clip=clip).output_slot == 0
+
+
+def test_core_and_pack_submodules_share_namespace():
+    from kstr_flow.registry import FlowRegistry
+
+    object_info = {
+        "CoreA": {"python_module": "nodes", "input": {}, "output": []},
+        "CoreB": {"python_module": "comfy_extras.nodes_foo", "input": {}, "output": []},
+        "CoreC": {"python_module": "comfy_api.latest._io", "input": {}, "output": []},
+        "ImpactA": {"python_module": "custom_nodes.ComfyUI-Impact-Pack.impact", "input": {}, "output": []},
+        "ImpactB": {"python_module": "custom_nodes.ComfyUI-Impact-Pack.sub.foo", "input": {}, "output": []},
+    }
+    registry = FlowRegistry.from_object_info(object_info)
+    assert set(registry.namespaces) == {"comfy", "impactpack"}
+    assert registry.metadata["CoreA"].namespace == "comfy"
+    assert registry.metadata["CoreB"].namespace == "comfy"
+    assert registry.metadata["CoreC"].namespace == "comfy"
+    assert registry.metadata["ImpactA"].namespace == "impactpack"
+    assert registry.metadata["ImpactB"].namespace == "impactpack"

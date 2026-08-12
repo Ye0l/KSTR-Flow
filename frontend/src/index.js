@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-import { autocompletion, completeFromList } from "@codemirror/autocomplete";
+import { autocompletion } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { python } from "@codemirror/lang-python";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
@@ -116,12 +116,80 @@ function signatureText(nodeInfo) {
 
 function makeNodeCompletion(nodeInfo) {
   const flags = [nodeInfo.deprecated && "deprecated", nodeInfo.experimental && "experimental"].filter(Boolean);
+  const callName = nodeInfo.call_name || nodeInfo.name;
+  const identity = nodeInfo.display_name && nodeInfo.display_name !== nodeInfo.name
+    ? `${nodeInfo.display_name} · ${nodeInfo.name}`
+    : nodeInfo.name;
+  const searchLabel = [callName, nodeInfo.name, nodeInfo.display_name, ...(nodeInfo.search_aliases ?? [])]
+    .filter(Boolean).join(" ");
   return {
-    label: nodeInfo.name,
+    label: searchLabel,
+    displayLabel: callName,
+    sortText: callName,
     type: "function",
-    detail: signatureText(nodeInfo),
+    detail: `${identity}  ${signatureText(nodeInfo)}`,
     info: [nodeInfo.description, flags.length ? `Flags: ${flags.join(", ")}` : null].filter(Boolean).join("\n\n"),
-    apply: `${nodeInfo.name}(`,
+    apply: `${callName}(`,
+  };
+}
+
+function findPackImport(text, pack) {
+  for (const [alias, target] of importedAliases(text)) {
+    if (target === pack) return { alias, imported: true };
+  }
+  return { alias: pack, imported: false };
+}
+
+function importInsertPoint(text) {
+  let insertAt = 0;
+  for (const match of text.matchAll(/^\s*import\s+[A-Za-z_]\w*(?:\s+as\s+[A-Za-z_]\w*)?\s*\n?/gm)) {
+    insertAt = match.index + match[0].length;
+  }
+  return insertAt;
+}
+
+function applyNodeWithAutoImport(view, from, to, pack, nodeInfo) {
+  let text = view.state.doc.toString();
+  const imported = findPackImport(text, pack);
+  let replaceFrom = from;
+  let replaceTo = to;
+
+  if (!imported.imported) {
+    const insertAt = importInsertPoint(text);
+    let importLine = `import ${pack}\n`;
+    if (insertAt === 0 && text.length && !text.startsWith("\n")) importLine += "\n";
+    view.dispatch({ changes: { from: insertAt, insert: importLine } });
+    if (insertAt <= replaceFrom) {
+      replaceFrom += importLine.length;
+      replaceTo += importLine.length;
+    }
+    text = view.state.doc.toString();
+  }
+
+  const callName = nodeInfo.call_name || nodeInfo.name;
+  const insertion = `${imported.alias}.${callName}(`;
+  view.dispatch({
+    changes: { from: replaceFrom, to: replaceTo, insert: insertion },
+    selection: { anchor: replaceFrom + insertion.length },
+    scrollIntoView: true,
+  });
+}
+
+function makeGlobalNodeCompletion(pack, nodeInfo) {
+  const callName = nodeInfo.call_name || nodeInfo.name;
+  const aliases = (nodeInfo.search_aliases ?? []).join(", ");
+  const searchLabel = [callName, nodeInfo.name, nodeInfo.display_name, ...(nodeInfo.search_aliases ?? [])]
+    .filter(Boolean).join(" ");
+  return {
+    label: searchLabel,
+    displayLabel: callName,
+    sortText: callName,
+    type: "function",
+    detail: `${nodeInfo.display_name || nodeInfo.name} · ${pack} · ${nodeInfo.name}`,
+    info: [signatureText(nodeInfo), nodeInfo.description, aliases ? `Aliases: ${aliases}` : null].filter(Boolean).join("\n\n"),
+    apply(view, _completion, from, to) {
+      applyNodeWithAutoImport(view, from, to, pack, nodeInfo);
+    },
   };
 }
 
@@ -139,7 +207,9 @@ function findCallAtCursor(textBefore, registry) {
   if (!match) return null;
   const aliases = importedAliases(textBefore);
   const pack = aliases.get(match[1]) || match[1];
-  const node = registry.packs?.[pack]?.find((item) => item.name === match[2]);
+  const node = registry.packs?.[pack]?.find((item) =>
+    (item.call_name || item.name) === match[2] || item.name === match[2]
+  );
   return node ? { node, fragment: match[3] } : null;
 }
 
@@ -198,11 +268,18 @@ async function kstrCompletion(context) {
 
   const word = context.matchBefore(/[A-Za-z_]\w*$/);
   if (!word || (!context.explicit && word.from === word.to)) return null;
+
+  registry._kstrGlobalCompletions ??= Object.entries(registry.packs ?? {}).flatMap(([pack, nodes]) =>
+    nodes.map((nodeInfo) => makeGlobalNodeCompletion(pack, nodeInfo))
+  );
+  const globalNodes = registry._kstrGlobalCompletions;
+
   return {
     from: word.from,
     options: [
-      ...RESERVED.map((label) => ({ label, type: "variable", detail: "KSTR Flow runtime" })),
-      ...BUILTINS.map((label) => ({ label, type: "function", detail: "safe builtin" })),
+      ...RESERVED.map((label) => ({ label, type: "variable", detail: "KSTR Flow runtime", boost: 50 })),
+      ...BUILTINS.map((label) => ({ label, type: "function", detail: "safe builtin", boost: 40 })),
+      ...globalNodes,
     ],
   };
 }
@@ -219,8 +296,27 @@ const editorTheme = EditorView.theme({
   ".cm-scroller": { overflow: "auto", minHeight: "0" },
   ".cm-gutters": { background: "transparent", border: "none", color: "#777" },
   ".cm-activeLine, .cm-activeLineGutter": { background: "rgba(127,127,127,.09)" },
-  ".cm-tooltip-autocomplete": { zIndex: "10000" },
-});
+  ".cm-tooltip": {
+    zIndex: "10000",
+    background: "var(--comfy-menu-bg, #202124)",
+    color: "var(--fg-color, #e5e5e5)",
+    border: "1px solid rgba(127,127,127,.35)",
+    boxShadow: "0 6px 20px rgba(0,0,0,.38)",
+  },
+  ".cm-tooltip-autocomplete > ul": { background: "var(--comfy-menu-bg, #202124)" },
+  ".cm-tooltip-autocomplete > ul > li": { color: "var(--fg-color, #e5e5e5)" },
+  ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
+    background: "rgba(110,140,220,.32)",
+    color: "#fff",
+  },
+  ".cm-completionDetail": { color: "rgba(220,220,220,.58)" },
+  ".cm-completionInfo": {
+    background: "var(--comfy-menu-bg, #202124)",
+    color: "var(--fg-color, #e5e5e5)",
+    border: "1px solid rgba(127,127,127,.35)",
+  },
+  ".cm-diagnosticText": { color: "var(--fg-color, #e5e5e5)" },
+}, { dark: true });
 
 function errorDiagnostic(view, error) {
   if (!error) return [];
@@ -256,11 +352,105 @@ function makeShell() {
   const divider = document.createElement("div");
   Object.assign(divider.style, { background: "rgba(127,127,127,.18)" });
 
+  const editorPane = document.createElement("div");
+  Object.assign(editorPane.style, {
+    position: "relative",
+    display: "grid",
+    gridTemplateRows: "30px minmax(0,1fr)",
+    minHeight: "0",
+    minWidth: "0",
+    overflow: "hidden",
+  });
+
+  const toolbar = document.createElement("div");
+  Object.assign(toolbar.style, {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    padding: "3px 6px",
+    borderBottom: "1px solid rgba(127,127,127,.16)",
+    background: "rgba(127,127,127,.05)",
+    color: "var(--fg-color, #ddd)",
+    font: "11px ui-sans-serif,system-ui,sans-serif",
+  });
+  const nodesButton = document.createElement("button");
+  nodesButton.type = "button";
+  nodesButton.textContent = "Nodes";
+  nodesButton.title = "Browse installed ComfyUI nodes (Ctrl/Cmd+Shift+N)";
+  Object.assign(nodesButton.style, {
+    border: "1px solid rgba(127,127,127,.28)",
+    borderRadius: "4px",
+    padding: "2px 8px",
+    background: "rgba(127,127,127,.10)",
+    color: "inherit",
+    cursor: "pointer",
+  });
+  const hint = document.createElement("span");
+  hint.textContent = "installed node browser";
+  Object.assign(hint.style, { opacity: ".48" });
+  toolbar.append(nodesButton, hint);
+
   const editorHost = document.createElement("div");
   Object.assign(editorHost.style, { minHeight: "0", minWidth: "0", overflow: "hidden" });
 
-  root.append(preview, divider, editorHost);
-  return { root, preview, editorHost };
+  const browser = document.createElement("div");
+  Object.assign(browser.style, {
+    position: "absolute",
+    inset: "30px 0 0 0",
+    zIndex: "20",
+    display: "none",
+    gridTemplateRows: "36px minmax(0,1fr)",
+    background: "var(--comfy-menu-bg, rgba(20,20,22,.99))",
+    color: "var(--fg-color, #ddd)",
+    borderTop: "1px solid rgba(127,127,127,.22)",
+  });
+
+  const browserHeader = document.createElement("div");
+  Object.assign(browserHeader.style, { display: "flex", gap: "6px", padding: "5px 6px" });
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "Search node name, display name, alias, category…";
+  Object.assign(search.style, {
+    flex: "1",
+    minWidth: "0",
+    border: "1px solid rgba(127,127,127,.28)",
+    borderRadius: "4px",
+    padding: "4px 7px",
+    background: "rgba(0,0,0,.20)",
+    color: "inherit",
+    outline: "none",
+    font: "11px ui-monospace,monospace",
+  });
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "×";
+  close.title = "Close node browser";
+  Object.assign(close.style, {
+    width: "28px",
+    border: "1px solid rgba(127,127,127,.25)",
+    borderRadius: "4px",
+    background: "transparent",
+    color: "inherit",
+    cursor: "pointer",
+    fontSize: "16px",
+  });
+  browserHeader.append(search, close);
+
+  const browserBody = document.createElement("div");
+  Object.assign(browserBody.style, { display: "grid", gridTemplateColumns: "150px minmax(0,1fr)", minHeight: "0" });
+  const packs = document.createElement("div");
+  Object.assign(packs.style, { overflow: "auto", borderRight: "1px solid rgba(127,127,127,.16)", padding: "4px" });
+  const results = document.createElement("div");
+  Object.assign(results.style, { overflow: "auto", padding: "5px 7px" });
+  browserBody.append(packs, results);
+  browser.append(browserHeader, browserBody);
+
+  editorPane.append(toolbar, editorHost, browser);
+  root.append(preview, divider, editorPane);
+  return {
+    root, preview, editorHost, nodesButton, browser, browserSearch: search, browserClose: close,
+    browserPacks: packs, browserResults: results,
+  };
 }
 
 function graphLayout(graph) {
@@ -434,6 +624,171 @@ function renderPreview(state) {
   }
 }
 
+function browserSearchText(pack, info) {
+  return [
+    pack, info.name, info.call_name, info.display_name, info.category, info.description,
+    ...(info.search_aliases ?? []),
+  ].filter(Boolean).join(" ").toLowerCase();
+}
+
+function styleBrowserButton(button, active = false) {
+  Object.assign(button.style, {
+    display: "block",
+    width: "100%",
+    border: "0",
+    borderRadius: "3px",
+    padding: "4px 6px",
+    textAlign: "left",
+    background: active ? "rgba(127,127,127,.18)" : "transparent",
+    color: "inherit",
+    cursor: "pointer",
+    font: "11px ui-sans-serif,system-ui,sans-serif",
+  });
+}
+
+function ensurePackImport(view, pack) {
+  const text = view.state.doc.toString();
+  const existing = findPackImport(text, pack);
+  if (existing.imported) return { alias: existing.alias, insertAt: -1, delta: 0 };
+
+  const insertAt = importInsertPoint(text);
+  let line = `import ${pack}\n`;
+  if (insertAt === 0 && text.length && !text.startsWith("\n")) line += "\n";
+  view.dispatch({ changes: { from: insertAt, insert: line } });
+  return { alias: pack, insertAt, delta: line.length };
+}
+
+function insertNodeCall(state, pack, info) {
+  const view = state.view;
+  if (!view) return;
+  const cursorBefore = view.state.selection.main.head;
+  const imported = ensurePackImport(view, pack);
+  const cursor = cursorBefore + (imported.insertAt >= 0 && imported.insertAt <= cursorBefore ? imported.delta : 0);
+  const callName = info.call_name || info.name;
+  const insertion = `${imported.alias}.${callName}()`;
+  view.dispatch({
+    changes: { from: cursor, to: cursor, insert: insertion },
+    selection: { anchor: cursor + insertion.length - 1 },
+    scrollIntoView: true,
+  });
+  view.focus();
+}
+
+function makeNodeRow(state, pack, info) {
+  const row = document.createElement("button");
+  row.type = "button";
+  styleBrowserButton(row, false);
+  Object.assign(row.style, { padding: "6px 7px", borderBottom: "1px solid rgba(127,127,127,.08)" });
+  const top = document.createElement("div");
+  top.textContent = info.display_name || info.name;
+  Object.assign(top.style, { fontWeight: "600", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+  const sub = document.createElement("div");
+  sub.textContent = `${pack}.${info.call_name || info.name}  ·  ${info.name}`;
+  Object.assign(sub.style, { opacity: ".58", font: "10px ui-monospace,monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+  row.append(top, sub);
+  row.title = [info.description, signatureText(info)].filter(Boolean).join("\n\n");
+  row.addEventListener("click", () => {
+    insertNodeCall(state, pack, info);
+    state.browserOpen = false;
+    state.shell.browser.style.display = "none";
+  });
+  return row;
+}
+
+function renderNodeBrowser(state) {
+  const registry = state.registry;
+  if (!registry) return;
+  const { browserPacks: packsHost, browserResults: resultsHost, browserSearch: search } = state.shell;
+  const query = search.value.trim().toLowerCase();
+  const packNames = Object.keys(registry.packs ?? {}).sort((a, b) => a.localeCompare(b));
+  const selected = state.browserPack && registry.packs?.[state.browserPack] ? state.browserPack : null;
+
+  packsHost.replaceChildren();
+  const all = document.createElement("button");
+  all.type = "button";
+  all.textContent = `All (${packNames.reduce((n, pack) => n + registry.packs[pack].length, 0)})`;
+  styleBrowserButton(all, !selected);
+  all.addEventListener("click", () => { state.browserPack = null; renderNodeBrowser(state); });
+  packsHost.append(all);
+  for (const pack of packNames) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `${pack} (${registry.packs[pack].length})`;
+    button.title = pack;
+    styleBrowserButton(button, selected === pack);
+    button.addEventListener("click", () => { state.browserPack = pack; renderNodeBrowser(state); });
+    packsHost.append(button);
+  }
+
+  resultsHost.replaceChildren();
+  if (!query && !selected) {
+    const help = document.createElement("div");
+    help.textContent = "Select a pack on the left, or search across all installed nodes.";
+    Object.assign(help.style, { opacity: ".58", padding: "10px", font: "11px ui-monospace,monospace" });
+    resultsHost.append(help);
+    return;
+  }
+
+  let matches = [];
+  for (const pack of packNames) {
+    if (selected && pack !== selected) continue;
+    for (const info of registry.packs[pack]) {
+      if (!query || browserSearchText(pack, info).includes(query)) matches.push({ pack, info });
+    }
+  }
+  matches.sort((a, b) => {
+    const cat = String(a.info.category || "Other").localeCompare(String(b.info.category || "Other"));
+    return cat || String(a.info.display_name || a.info.name).localeCompare(String(b.info.display_name || b.info.name));
+  });
+
+  if (!matches.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "No matching installed nodes";
+    Object.assign(empty.style, { opacity: ".55", padding: "8px", font: "11px ui-monospace,monospace" });
+    resultsHost.append(empty);
+    return;
+  }
+
+  const grouped = new Map();
+  for (const item of matches.slice(0, query ? 300 : 1200)) {
+    const category = item.info.category || "Other";
+    if (!grouped.has(category)) grouped.set(category, []);
+    grouped.get(category).push(item);
+  }
+  for (const [category, items] of grouped) {
+    const details = document.createElement("details");
+    details.open = Boolean(query) || grouped.size <= 8;
+    const summary = document.createElement("summary");
+    summary.textContent = `${category} (${items.length})`;
+    Object.assign(summary.style, { cursor: "pointer", padding: "5px 3px", opacity: ".82", font: "11px ui-monospace,monospace" });
+    details.append(summary);
+    for (const { pack, info } of items) details.append(makeNodeRow(state, pack, info));
+    resultsHost.append(details);
+  }
+}
+
+async function openNodeBrowser(state) {
+  state.browserOpen = true;
+  state.shell.browser.style.display = "grid";
+  state.shell.browserSearch.focus();
+  if (!state.registry) {
+    state.shell.browserResults.textContent = "Loading installed nodes…";
+    try {
+      state.registry = await loadRegistry();
+    } catch (error) {
+      state.shell.browserResults.textContent = `Failed to load node registry: ${error}`;
+      return;
+    }
+  }
+  renderNodeBrowser(state);
+}
+
+function closeNodeBrowser(state) {
+  state.browserOpen = false;
+  state.shell.browser.style.display = "none";
+  state.view?.focus();
+}
+
 async function analyze(node) {
   const state = node[STATE];
   if (!state?.view) return;
@@ -496,7 +851,11 @@ function install(node) {
     error: null,
     sourceWidget: source,
     preview: shell.preview,
+    shell,
     view: null,
+    registry: null,
+    browserOpen: false,
+    browserPack: null,
   };
 
   const editorState = EditorState.create({
@@ -524,6 +883,23 @@ function install(node) {
   });
   state.view = new EditorView({ state: editorState, parent: shell.editorHost });
 
+  shell.nodesButton.addEventListener("click", () => {
+    if (state.browserOpen) closeNodeBrowser(state);
+    else openNodeBrowser(state);
+  });
+  shell.browserClose.addEventListener("click", () => closeNodeBrowser(state));
+  shell.browserSearch.addEventListener("input", () => renderNodeBrowser(state));
+  shell.browserSearch.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); closeNodeBrowser(state); }
+  });
+  shell.root.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "n") {
+      event.preventDefault();
+      if (state.browserOpen) closeNodeBrowser(state);
+      else openNodeBrowser(state);
+    }
+  });
+
   const domWidget = node.addDOMWidget("kstr_flow_editor", "KSTR_FLOW_EDITOR", shell.root, {
     serialize: false,
     hideOnZoom: false,
@@ -546,8 +922,8 @@ function install(node) {
     return oldRemoved?.apply(this, args);
   };
 
-  // Preload registry so first completion is instant after initial analysis.
-  loadRegistry().catch(() => {});
+  // Preload registry so first completion/browser opening is instant.
+  loadRegistry().then((registry) => { state.registry = registry; }).catch(() => {});
   scheduleAnalyze(node, 0);
 }
 
