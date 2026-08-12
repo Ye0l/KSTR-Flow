@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
-import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import { defaultKeymap, history, historyKeymap, indentWithTab, redo, undo } from "@codemirror/commands";
 import { python } from "@codemirror/lang-python";
 import { HighlightStyle, bracketMatching, indentOnInput, syntaxHighlighting } from "@codemirror/language";
 import { setDiagnostics } from "@codemirror/lint";
@@ -24,6 +24,7 @@ import { tags } from "@lezer/highlight";
 
 const FLOW_CLASS = "KSTRFlow";
 const STATE = Symbol("kstrFlowState");
+const ROOT_STATE = Symbol("kstrFlowRootState");
 const STATIC_INPUTS = new Set(["source", "global_seed"]);
 const BUILTINS = [
   "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
@@ -34,6 +35,33 @@ const RESERVED = ["global_seed", "seed", "random", "math", "nodes"];
 
 let registryPromise = null;
 const optionPromises = new Map();
+let historyGuardInstalled = false;
+
+function ensureHistoryGuard() {
+  if (historyGuardInstalled) return;
+  historyGuardInstalled = true;
+  // Comfy's ChangeTracker listens during document capture and only exempts
+  // INPUT/TEXTAREA. CodeMirror edits a contenteditable DIV, so Ctrl+Z would
+  // otherwise restore the whole workflow before CodeMirror sees the key.
+  window.addEventListener("keydown", (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    const key = event.key.toLowerCase();
+    if (key !== "z" && key !== "y") return;
+    const active = document.activeElement;
+    const root = active?.closest?.(".kstr-flow-shell");
+    const state = root?.[ROOT_STATE];
+    if (!state?.view) return;
+
+    if (key === "z" && !event.shiftKey) undo(state.view);
+    else if ((key === "z" && event.shiftKey) || (key === "y" && !event.shiftKey)) redo(state.view);
+    else return;
+    // Even when CodeMirror has no matching history entry, never fall through to
+    // Comfy's workflow-level undo while the editor owns keyboard focus.
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+  }, true);
+}
 
 function sourceWidget(node) {
   return node.widgets?.find((widget) => widget.name === "source");
@@ -580,6 +608,25 @@ function errorDiagnostic(view, error) {
   return [{ from, to: Math.min(line.to, from + 1), severity: "error", message: error.message || String(error) }];
 }
 
+function bindInternalWheel(element, getScroller, signal) {
+  element.dataset.captureWheel = "true";
+  element.addEventListener("wheel", (event) => {
+    const scroller = getScroller();
+    if (!scroller) return;
+    // Consume the wheel before Vue Nodes 2.0 can forward it to the canvas.
+    // We scroll explicitly so this also works in legacy DOM-widget mode.
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    if (event.ctrlKey || event.metaKey) return;
+    if (event.shiftKey && event.deltaX === 0) scroller.scrollLeft += event.deltaY;
+    else {
+      scroller.scrollLeft += event.deltaX;
+      scroller.scrollTop += event.deltaY;
+    }
+  }, { capture: true, passive: false, signal });
+}
+
 function makeShell() {
   const root = document.createElement("div");
   root.className = "kstr-flow-shell";
@@ -883,9 +930,16 @@ function renderGraph(preview, graph) {
 function renderPreview(state) {
   const { preview, analysis } = state;
   preview.replaceChildren();
+  if (state.error && (!analysis || analysis.ok === false)) {
+    const error = document.createElement("div");
+    error.textContent = state.error.message || "Analysis failed";
+    Object.assign(error.style, { color: "#e57373", font: "12px ui-monospace,monospace", whiteSpace: "pre-wrap" });
+    preview.append(error);
+    return;
+  }
   if (!analysis) {
     const waiting = document.createElement("div");
-    waiting.textContent = "Graph preview · waiting for analysis";
+    waiting.textContent = "Graph preview · analyzing…";
     Object.assign(waiting.style, { opacity: ".6", font: "12px ui-monospace,monospace" });
     preview.append(waiting);
     return;
@@ -1092,6 +1146,10 @@ async function analyze(node) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source }),
     });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`analyze HTTP ${response.status}${body ? `: ${body.slice(0, 240)}` : ""}`);
+    }
     const result = await response.json();
     if (generation !== state.generation) return;
     state.analysis = result;
@@ -1106,8 +1164,10 @@ async function analyze(node) {
   } catch (error) {
     if (generation !== state.generation) return;
     state.error = { message: String(error), line: 1, column: 1 };
+    state.analysis = { ok: false, error: state.error, graph: null, graph_error: null, symbols: {} };
     setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
     renderPreview(state);
+    console.error("[KSTR Flow] analysis failed", error);
   }
 }
 
@@ -1143,6 +1203,7 @@ function install(node) {
   setWidgetHidden(source, true);
 
   const shell = makeShell();
+  const controller = new AbortController();
   const state = node[STATE] = {
     generation: 0,
     timer: null,
@@ -1155,7 +1216,11 @@ function install(node) {
     registry: null,
     browserOpen: false,
     browserPack: null,
+    controller,
+    destroyed: false,
   };
+  shell.root[ROOT_STATE] = state;
+  ensureHistoryGuard();
 
   const editorState = EditorState.create({
     doc: String(source.value ?? ""),
@@ -1186,17 +1251,22 @@ function install(node) {
   });
   state.view = new EditorView({ state: editorState, parent: shell.editorHost });
 
-  // Comfy/LiteGraph installs canvas-level input handlers. Keep editor and
-  // completion-list interaction inside the DOM widget so arrows/Enter/clicks
-  // are not reinterpreted as canvas actions.
-  for (const eventName of ["keydown", "keyup", "pointerdown", "pointerup", "mousedown", "mouseup", "click", "wheel"]) {
-    shell.editorHost.addEventListener(eventName, (event) => event.stopPropagation());
+  // Keep all editor interaction inside the DOM widget. Nodes 2.0 forwards wheel
+  // events from the node container unless a focused descendant opts into wheel
+  // capture; legacy mode also needs explicit scrolling instead of canvas zoom.
+  const { signal } = controller;
+  shell.editorHost.dataset.captureWheel = "true";
+  shell.preview.dataset.captureWheel = "true";
+  shell.preview.tabIndex = 0;
+  bindInternalWheel(shell.editorHost, () => state.view?.scrollDOM, signal);
+  bindInternalWheel(shell.preview, () => shell.preview, signal);
+  for (const eventName of ["keydown", "keyup", "pointerdown", "pointerup", "mousedown", "mouseup", "click"]) {
+    shell.editorHost.addEventListener(eventName, (event) => event.stopPropagation(), { signal });
   }
-  // Preview has its own scroll area. Do not let wheel/pointer gestures become
-  // canvas zoom/drag operations while the pointer is over it.
-  for (const eventName of ["wheel", "pointerdown", "pointerup", "mousedown", "mouseup"]) {
-    shell.preview.addEventListener(eventName, (event) => event.stopPropagation());
+  for (const eventName of ["pointerdown", "pointerup", "mousedown", "mouseup"]) {
+    shell.preview.addEventListener(eventName, (event) => event.stopPropagation(), { signal });
   }
+  shell.preview.addEventListener("pointerdown", () => shell.preview.focus({ preventScroll: true }), { signal });
 
   shell.nodesButton.addEventListener("click", () => {
     if (state.browserOpen) closeNodeBrowser(state);
@@ -1232,10 +1302,11 @@ function install(node) {
 
   const oldRemoved = node.onRemoved;
   node.onRemoved = function (...args) {
+    state.destroyed = true;
+    controller.abort();
     state.view?.destroy();
     clearTimeout(state.timer);
-    // Comfy undo/redo may remove and later restore the same node object. A
-    // destroyed EditorView must never make install() think the node is still live.
+    if (shell.root[ROOT_STATE] === state) delete shell.root[ROOT_STATE];
     if (node[STATE] === state) delete node[STATE];
     return oldRemoved?.apply(this, args);
   };
@@ -1245,16 +1316,36 @@ function install(node) {
   scheduleAnalyze(node, 0);
 }
 
+function isFlowNode(node) {
+  return node?.comfyClass === FLOW_CLASS || node?.type === FLOW_CLASS;
+}
+
+function ensureFlowNode(node) {
+  if (!isFlowNode(node)) return;
+  if (node[STATE]?.destroyed) delete node[STATE];
+  install(node);
+  syncEditorFromWidget(node);
+  scheduleAnalyze(node, 0);
+}
+
+function walkGraph(graph, visit) {
+  if (!graph) return;
+  for (const node of graph._nodes ?? []) visit(node);
+  const subgraphs = graph.subgraphs;
+  if (subgraphs?.values) for (const subgraph of subgraphs.values()) walkGraph(subgraph, visit);
+}
+
 app.registerExtension({
   name: "KSTR.Flow",
   async nodeCreated(node) {
-    if (node.comfyClass === FLOW_CLASS) install(node);
+    if (isFlowNode(node)) install(node);
   },
   loadedGraphNode(node) {
-    if (node.comfyClass === FLOW_CLASS) {
-      install(node);
-      syncEditorFromWidget(node);
-      scheduleAnalyze(node, 0);
-    }
+    ensureFlowNode(node);
+  },
+  async afterConfigureGraph() {
+    // ChangeTracker undo/redo reloads the whole graph. Re-scan after every
+    // configure pass so Nodes 2.0 rehydration cannot leave a dead editor behind.
+    requestAnimationFrame(() => walkGraph(app.rootGraph, ensureFlowNode));
   },
 });
