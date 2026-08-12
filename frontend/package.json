@@ -1,0 +1,23 @@
+{
+  "name": "kstr-flow-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --minify --format=esm --target=es2022 --outfile=../src/kstr_flow/web/kstr-flow.js --external:../../scripts/app.js --external:../../scripts/api.js",
+    "check": "npm run build"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.18.6",
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/language": "^6.11.0",
+    "@codemirror/lint": "^6.8.5",
+    "@codemirror/search": "^6.5.10",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.36.5"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.5"
+  }
+}

@@ -26,14 +26,23 @@ async def kstr_flow_registry(request):
         for group in ("required", "optional"):
             for name, value in info.get("input", {}).get(group, {}).items():
                 declared = value[0] if isinstance(value, (list, tuple)) and value else "*"
+                config = value[1] if isinstance(value, (list, tuple)) and len(value) > 1 and isinstance(value[1], dict) else {}
+                is_combo = isinstance(declared, (list, tuple))
                 inputs.append({
                     "name": name,
-                    "type": declared if isinstance(declared, str) else "COMBO",
+                    "type": "COMBO" if is_combo else (declared if isinstance(declared, str) else "*"),
                     "optional": group == "optional",
+                    "has_default": "default" in config,
+                    "default": config.get("default"),
+                    "options": list(declared) if is_combo else None,
+                    "tooltip": config.get("tooltip"),
+                    "advanced": bool(config.get("advanced", False)),
                 })
         packs.setdefault(meta.namespace, []).append({
             "name": raw_name,
             "display_name": info.get("display_name", raw_name),
+            "description": info.get("description", ""),
+            "category": info.get("category", ""),
             "inputs": inputs,
             "outputs": [
                 {"name": name, "type": typ}
@@ -44,6 +53,7 @@ async def kstr_flow_registry(request):
             ],
             "deprecated": bool(info.get("deprecated", False)),
             "experimental": bool(info.get("experimental", False)),
+            "search_aliases": list(info.get("search_aliases", [])),
         })
     for nodes in packs.values():
         nodes.sort(key=lambda item: item["name"].lower())

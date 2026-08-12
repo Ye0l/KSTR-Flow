@@ -1,0 +1,2 @@
+# Bundled third-party CodeMirror output may contain whitespace-only lines.
+src/kstr_flow/web/kstr-flow.js whitespace=-trailing-space
