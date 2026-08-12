@@ -1134,17 +1134,25 @@ function closeNodeBrowser(state) {
   state.view?.focus();
 }
 
-async function analyze(node) {
-  const state = node[STATE];
-  if (!state?.view) return;
+async function analyzeState(node, state) {
+  if (!state?.view || state.destroyed) return;
   const source = state.view.state.doc.toString();
   const generation = ++state.generation;
+  state.analysis = null;
+  state.error = null;
+  renderPreview(state);
+
+  const requestController = new AbortController();
+  state.analyzeController?.abort();
+  state.analyzeController = requestController;
+  const timeout = setTimeout(() => requestController.abort("analysis timeout"), 10000);
 
   try {
     const response = await api.fetchApi("/kstr-flow/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source }),
+      signal: requestController.signal,
     });
     if (!response.ok) {
       const body = await response.text().catch(() => "");
@@ -1163,19 +1171,26 @@ async function analyze(node) {
     node.setDirtyCanvas?.(true, true);
   } catch (error) {
     if (generation !== state.generation) return;
-    state.error = { message: String(error), line: 1, column: 1 };
+    const message = requestController.signal.aborted
+      ? "Analysis request timed out after 10s"
+      : String(error);
+    state.error = { message, line: 1, column: 1 };
     state.analysis = { ok: false, error: state.error, graph: null, graph_error: null, symbols: {} };
     setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
     renderPreview(state);
     console.error("[KSTR Flow] analysis failed", error);
+  } finally {
+    clearTimeout(timeout);
+    if (state.analyzeController === requestController) state.analyzeController = null;
   }
 }
 
-function scheduleAnalyze(node, delay = 180) {
-  const state = node[STATE];
-  if (!state) return;
+function scheduleAnalyze(node, state = node[STATE], delay = 180) {
+  if (!state || state.destroyed) return;
   clearTimeout(state.timer);
-  state.timer = setTimeout(() => analyze(node), delay);
+  state.timer = setTimeout(() => {
+    if (!state.destroyed) void analyzeState(node, state);
+  }, delay);
 }
 
 function syncEditorFromWidget(node) {
@@ -1245,11 +1260,25 @@ function install(node) {
         if (!update.docChanged) return;
         const text = update.state.doc.toString();
         if (state.sourceWidget.value !== text) state.sourceWidget.value = text;
-        scheduleAnalyze(node);
+        scheduleAnalyze(node, state);
       }),
     ],
   });
   state.view = new EditorView({ state: editorState, parent: shell.editorHost });
+
+  // Comfy ChangeTracker exempts INPUT/TEXTAREA from workflow-level Ctrl+Z.
+  // CodeMirror focuses a contenteditable DIV, so mark that focused element with
+  // the same `type` discriminator ChangeTracker checks before it sees keydown.
+  // This prevents workflow reload/rehydration at the source instead of trying to
+  // stop an earlier window-capture listener after it already ran.
+  state.view.contentDOM.type = "textarea";
+  state.view.contentDOM.dataset.kstrFlowEditor = "true";
+
+  // Analyze from the state closure immediately. Do not depend on node[STATE]
+  // surviving Nodes 2.0 configure/rehydration before the first timer fires.
+  queueMicrotask(() => {
+    if (!state.destroyed) void analyzeState(node, state);
+  });
 
   // Keep all editor interaction inside the DOM widget. Nodes 2.0 forwards wheel
   // events from the node container unless a focused descendant opts into wheel
@@ -1304,6 +1333,7 @@ function install(node) {
   node.onRemoved = function (...args) {
     state.destroyed = true;
     controller.abort();
+    state.analyzeController?.abort();
     state.view?.destroy();
     clearTimeout(state.timer);
     if (shell.root[ROOT_STATE] === state) delete shell.root[ROOT_STATE];
@@ -1313,7 +1343,7 @@ function install(node) {
 
   // Preload registry so first completion/browser opening is instant.
   loadRegistry().then((registry) => { state.registry = registry; }).catch(() => {});
-  scheduleAnalyze(node, 0);
+  scheduleAnalyze(node, state, 0);
 }
 
 function isFlowNode(node) {
@@ -1325,7 +1355,8 @@ function ensureFlowNode(node) {
   if (node[STATE]?.destroyed) delete node[STATE];
   install(node);
   syncEditorFromWidget(node);
-  scheduleAnalyze(node, 0);
+  const state = node[STATE];
+  if (state) scheduleAnalyze(node, state, 0);
 }
 
 function walkGraph(graph, visit) {

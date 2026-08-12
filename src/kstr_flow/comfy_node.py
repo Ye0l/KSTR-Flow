@@ -13,11 +13,62 @@ from .registry import get_runtime_registry
 
 WEB_DIRECTORY = "./web"
 MAX_OUTPUTS = 32
-DEFAULT_SOURCE = '''import comfy
 
 
-def workflow(image: IMAGE) -> IMAGE:
-    return image
+def _default_checkpoint_name() -> str:
+    try:
+        import folder_paths
+
+        names = folder_paths.get_filename_list("checkpoints")
+        if names:
+            return str(names[0])
+    except Exception:
+        pass
+    return "select_checkpoint.safetensors"
+
+
+def _default_source() -> str:
+    ckpt = repr(_default_checkpoint_name())
+    return f'''import comfy
+
+
+def workflow() -> IMAGE:
+    model, clip, vae = comfy.CheckpointLoaderSimple(
+        ckpt_name={ckpt},
+    )
+
+    positive = comfy.CLIPTextEncode(
+        text="1girl, solo, masterpiece, best quality",
+        clip=clip,
+    )
+    negative = comfy.CLIPTextEncode(
+        text="low quality, worst quality",
+        clip=clip,
+    )
+
+    latent = comfy.EmptyLatentImage(
+        width=1024,
+        height=1024,
+        batch_size=1,
+    )
+
+    sampled = comfy.KSampler(
+        model=model,
+        seed=seed,
+        steps=28,
+        cfg=5.0,
+        sampler_name="euler",
+        scheduler="normal",
+        positive=positive,
+        negative=negative,
+        latent_image=latent,
+        denoise=1.0,
+    )
+
+    return comfy.VAEDecode(
+        samples=sampled,
+        vae=vae,
+    )
 '''
 
 
@@ -34,7 +85,7 @@ class KSTRFlowNode(io.ComfyNode):
             inputs=[
                 io.String.Input(
                     "source",
-                    default=DEFAULT_SOURCE,
+                    default=_default_source(),
                     multiline=True,
                     dynamic_prompts=False,
                     tooltip="KSTR Flow source code",
