@@ -210,13 +210,13 @@ async function kstrCompletion(context) {
 const editorTheme = EditorView.theme({
   "&": {
     height: "100%",
-    minHeight: "260px",
+    minHeight: "0",
     fontSize: "12px",
     background: "var(--comfy-input-bg, #18181b)",
     color: "var(--fg-color, #ddd)",
   },
   ".cm-content": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", padding: "8px 0" },
-  ".cm-scroller": { overflow: "auto" },
+  ".cm-scroller": { overflow: "auto", minHeight: "0" },
   ".cm-gutters": { background: "transparent", border: "none", color: "#777" },
   ".cm-activeLine, .cm-activeLineGutter": { background: "rgba(127,127,127,.09)" },
   ".cm-tooltip-autocomplete": { zIndex: "10000" },
@@ -236,10 +236,12 @@ function makeShell() {
   root.className = "kstr-flow-shell";
   Object.assign(root.style, {
     display: "grid",
-    gridTemplateRows: "minmax(110px, 0.42fr) 6px minmax(260px, 1fr)",
-    height: "520px",
-    minHeight: "420px",
+    gridTemplateRows: "minmax(90px, 2fr) 6px minmax(140px, 3fr)",
+    height: "100%",
+    minHeight: "0",
     width: "100%",
+    minWidth: "0",
+    boxSizing: "border-box",
     overflow: "hidden",
     border: "1px solid rgba(127,127,127,.25)",
     borderRadius: "6px",
@@ -255,7 +257,7 @@ function makeShell() {
   Object.assign(divider.style, { background: "rgba(127,127,127,.18)" });
 
   const editorHost = document.createElement("div");
-  Object.assign(editorHost.style, { minHeight: "0", overflow: "hidden" });
+  Object.assign(editorHost.style, { minHeight: "0", minWidth: "0", overflow: "hidden" });
 
   root.append(preview, divider, editorHost);
   return { root, preview, editorHost };
@@ -527,9 +529,15 @@ function install(node) {
     hideOnZoom: false,
     getValue: () => "",
     setValue: () => {},
+    // Let LiteGraph allocate all remaining widget space. The DOM root then fills
+    // that allocation instead of keeping an independent fixed pixel height.
+    getMinHeight: () => 300,
+    afterResize: () => {
+      state.view?.requestMeasure();
+    },
   });
-  domWidget.options.minNodeSize = [520, 620];
-  node.setSize([Math.max(node.size?.[0] ?? 520, 620), Math.max(node.size?.[1] ?? 620, 720)]);
+  domWidget.options.minNodeSize = [520, 430];
+  node.setSize([Math.max(node.size?.[0] ?? 520, 620), Math.max(node.size?.[1] ?? 430, 620)]);
 
   const oldRemoved = node.onRemoved;
   node.onRemoved = function (...args) {
