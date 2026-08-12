@@ -532,8 +532,11 @@ async function kstrHover(state, view, pos) {
 
 const editorTheme = EditorView.theme({
   "&": {
-    height: "100%",
+    position: "absolute",
+    inset: "0",
+    height: "auto",
     minHeight: "0",
+    minWidth: "0",
     fontSize: "12px",
     background: "var(--comfy-input-bg, #18181b)",
     color: "var(--fg-color, #ddd)",
@@ -592,12 +595,44 @@ function makeShell() {
     border: "1px solid rgba(127,127,127,.25)",
     borderRadius: "6px",
     background: "rgba(20,20,22,.94)",
+    color: "var(--fg-color, #ddd)",
+    contain: "size layout paint",
   });
 
+  const previewPane = document.createElement("div");
+  Object.assign(previewPane.style, {
+    display: "grid",
+    gridTemplateRows: "24px minmax(0,1fr)",
+    minHeight: "0",
+    minWidth: "0",
+    overflow: "hidden",
+    color: "var(--fg-color, #ddd)",
+  });
+  const previewHeader = document.createElement("div");
+  previewHeader.textContent = "Graph Preview";
+  Object.assign(previewHeader.style, {
+    display: "flex",
+    alignItems: "center",
+    padding: "0 7px",
+    borderBottom: "1px solid rgba(127,127,127,.14)",
+    background: "rgba(127,127,127,.05)",
+    opacity: ".72",
+    font: "10px ui-sans-serif,system-ui,sans-serif",
+  });
   const preview = document.createElement("div");
   preview.className = "kstr-flow-preview";
-  Object.assign(preview.style, { position: "relative", overflow: "auto", padding: "8px", userSelect: "none" });
-  preview.innerHTML = `<div style="opacity:.6;font:12px ui-monospace,monospace">Graph preview · waiting for analysis</div>`;
+  Object.assign(preview.style, {
+    position: "relative",
+    minHeight: "0",
+    minWidth: "0",
+    overflow: "auto",
+    overscrollBehavior: "contain",
+    padding: "8px",
+    userSelect: "none",
+    color: "var(--fg-color, #ddd)",
+  });
+  preview.innerHTML = `<div style="opacity:.6;font:12px ui-monospace,monospace">waiting for analysis…</div>`;
+  previewPane.append(previewHeader, preview);
 
   const divider = document.createElement("div");
   Object.assign(divider.style, { background: "rgba(127,127,127,.18)" });
@@ -641,7 +676,13 @@ function makeShell() {
   toolbar.append(nodesButton, hint);
 
   const editorHost = document.createElement("div");
-  Object.assign(editorHost.style, { minHeight: "0", minWidth: "0", overflow: "hidden" });
+  Object.assign(editorHost.style, {
+    position: "relative",
+    minHeight: "0",
+    minWidth: "0",
+    overflow: "hidden",
+    contain: "strict",
+  });
 
   const browser = document.createElement("div");
   Object.assign(browser.style, {
@@ -696,7 +737,7 @@ function makeShell() {
   browser.append(browserHeader, browserBody);
 
   editorPane.append(toolbar, editorHost, browser);
-  root.append(preview, divider, editorPane);
+  root.append(previewPane, divider, editorPane);
   return {
     root, preview, editorHost, nodesButton, browser, browserSearch: search, browserClose: close,
     browserPacks: packs, browserResults: results,
@@ -1089,6 +1130,14 @@ function syncEditorFromWidget(node) {
 function install(node) {
   if (node[STATE]) return;
 
+  // Undo/redo can restore the same LiteGraph node object after its DOM widget
+  // was unmounted. Remove any stale editor widget before creating a fresh one.
+  for (const widget of [...(node.widgets ?? [])]) {
+    if (widget?.name === "kstr_flow_editor") {
+      try { node.removeWidget(widget); } catch {}
+    }
+  }
+
   const source = sourceWidget(node);
   if (!source) return;
   setWidgetHidden(source, true);
@@ -1143,6 +1192,11 @@ function install(node) {
   for (const eventName of ["keydown", "keyup", "pointerdown", "pointerup", "mousedown", "mouseup", "click", "wheel"]) {
     shell.editorHost.addEventListener(eventName, (event) => event.stopPropagation());
   }
+  // Preview has its own scroll area. Do not let wheel/pointer gestures become
+  // canvas zoom/drag operations while the pointer is over it.
+  for (const eventName of ["wheel", "pointerdown", "pointerup", "mousedown", "mouseup"]) {
+    shell.preview.addEventListener(eventName, (event) => event.stopPropagation());
+  }
 
   shell.nodesButton.addEventListener("click", () => {
     if (state.browserOpen) closeNodeBrowser(state);
@@ -1180,6 +1234,9 @@ function install(node) {
   node.onRemoved = function (...args) {
     state.view?.destroy();
     clearTimeout(state.timer);
+    // Comfy undo/redo may remove and later restore the same node object. A
+    // destroyed EditorView must never make install() think the node is still live.
+    if (node[STATE] === state) delete node[STATE];
     return oldRemoved?.apply(this, args);
   };
 
