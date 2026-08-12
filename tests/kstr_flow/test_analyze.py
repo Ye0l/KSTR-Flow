@@ -59,3 +59,20 @@ def workflow(prompt: STRING) -> IMAGE:
     assert result["symbols"]["clip"]["type"] == "CLIP"
     assert result["symbols"]["vae"]["type"] == "VAE"
     assert result["symbols"]["cond"]["type"] == "CONDITIONING"
+
+
+def test_analyze_can_skip_preview(registry, monkeypatch):
+    import kstr_flow.preview as preview
+
+    def fail_preview(*args, **kwargs):
+        raise AssertionError("preview should not run")
+
+    monkeypatch.setattr(preview, "build_preview_graph", fail_preview)
+    result = analyze_source(
+        'def workflow(prompt: STRING) -> STRING:\n    return prompt',
+        registry,
+        include_preview=False,
+    )
+    assert result["ok"] is True
+    assert result["graph"] is None
+    assert result["graph_error"] is None

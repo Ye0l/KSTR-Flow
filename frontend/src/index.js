@@ -23,7 +23,7 @@ import {
 import { tags } from "@lezer/highlight";
 
 const FLOW_CLASS = "KSTRFlow";
-const FRONTEND_BUILD = "2026-08-12.2235";
+const FRONTEND_BUILD = "2026-08-12.2253";
 const STATE = Symbol("kstrFlowState");
 const ROOT_STATE = Symbol("kstrFlowRootState");
 const STATIC_INPUTS = new Set(["source", "global_seed"]);
@@ -1152,56 +1152,92 @@ function setPreviewStatus(state, status) {
   if (state?.shell?.previewStatus) state.shell.previewStatus.textContent = `${status} · ${FRONTEND_BUILD}`;
 }
 
+function promiseTimeout(ms, label) {
+  let timer;
+  const promise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms / 1000}s`)), ms);
+  });
+  return { promise, cancel: () => clearTimeout(timer) };
+}
+
+async function fetchJsonBounded(path, source, signal, timeoutMs, label) {
+  const timeout = promiseTimeout(timeoutMs, label);
+  try {
+    const response = await Promise.race([
+      api.fetchApi(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source }),
+        signal,
+      }),
+      timeout.promise,
+    ]);
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      throw new Error(`${label} HTTP ${response.status}${body ? `: ${body.slice(0, 240)}` : ""}`);
+    }
+    return await response.json();
+  } finally {
+    timeout.cancel();
+  }
+}
+
 async function analyzeState(node, state) {
   if (!state?.view || state.destroyed) return;
   const source = state.view.state.doc.toString();
   const generation = ++state.generation;
   state.analysis = null;
   state.error = null;
-  setPreviewStatus(state, "analyzing");
+  setPreviewStatus(state, "analyze: request");
   renderPreview(state);
 
   const requestController = new AbortController();
   state.analyzeController?.abort();
   state.analyzeController = requestController;
-  const timeout = setTimeout(() => requestController.abort("analysis timeout"), 10000);
 
   try {
-    const response = await api.fetchApi("/kstr-flow/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source }),
-      signal: requestController.signal,
-    });
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new Error(`analyze HTTP ${response.status}${body ? `: ${body.slice(0, 240)}` : ""}`);
-    }
-    const result = await response.json();
+    const result = await fetchJsonBounded(
+      "/kstr-flow/analyze", source, requestController.signal, 4000, "Analysis"
+    );
     if (generation !== state.generation) return;
     state.analysis = result;
     state.error = result.ok ? null : result.error;
-    if (result.ok) {
-      syncInputs(node, result.inputs ?? []);
-      syncOutputs(node, result.outputs ?? []);
+    if (!result.ok) {
+      setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
+      setPreviewStatus(state, "syntax error");
+      renderPreview(state);
+      return;
     }
-    setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
-    setPreviewStatus(state, result.ok ? "ready" : "error");
+
+    syncInputs(node, result.inputs ?? []);
+    syncOutputs(node, result.outputs ?? []);
+    setDiagnostics(state.view, []);
+    setPreviewStatus(state, "preview: request");
+
+    const preview = await fetchJsonBounded(
+      "/kstr-flow/preview", source, requestController.signal, 7000, "Preview"
+    );
+    if (generation !== state.generation) return;
+    state.analysis.graph = preview.graph ?? null;
+    state.analysis.graph_error = preview.graph_error ?? null;
+    setPreviewStatus(state, preview.ok ? "ready" : "preview error");
     renderPreview(state);
     node.setDirtyCanvas?.(true, true);
   } catch (error) {
     if (generation !== state.generation) return;
-    const message = requestController.signal.aborted
-      ? "Analysis request timed out after 10s"
-      : String(error);
+    const message = String(error?.message ?? error);
     state.error = { message, line: 1, column: 1 };
-    state.analysis = { ok: false, error: state.error, graph: null, graph_error: null, symbols: {} };
+    if (!state.analysis) {
+      state.analysis = { ok: false, error: state.error, graph: null, graph_error: null, symbols: {} };
+    } else {
+      state.analysis.graph = null;
+      state.analysis.graph_error = message;
+    }
     setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
     setPreviewStatus(state, "error");
     renderPreview(state);
-    console.error("[KSTR Flow] analysis failed", error);
+    console.error("[KSTR Flow] analysis/preview failed", error);
   } finally {
-    clearTimeout(timeout);
     if (state.analyzeController === requestController) state.analyzeController = null;
   }
 }

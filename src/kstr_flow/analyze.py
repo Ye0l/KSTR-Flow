@@ -113,7 +113,12 @@ def _infer_symbols(tree: ast.Module, registry: "FlowRegistry") -> dict[str, dict
     return symbols
 
 
-def analyze_source(source: str, registry: "FlowRegistry | None" = None) -> dict[str, Any]:
+def analyze_source(
+    source: str,
+    registry: "FlowRegistry | None" = None,
+    *,
+    include_preview: bool = True,
+) -> dict[str, Any]:
     try:
         tree = ast.parse(source, mode="exec")
         signature = parse_signature(tree)
@@ -128,14 +133,15 @@ def analyze_source(source: str, registry: "FlowRegistry | None" = None) -> dict[
         }
         if registry is not None:
             result["symbols"] = _infer_symbols(tree, registry)
-            try:
-                from .preview import build_preview_graph
-                result["graph"] = build_preview_graph(source, registry)
-            except Exception as exc:
-                # Graph preview is best-effort. A runtime-dependent branch may not
-                # be resolvable from defaults/placeholders, but that must not make
-                # otherwise valid source impossible to edit.
-                result["graph_error"] = f"{type(exc).__name__}: {exc}"
+            if include_preview:
+                try:
+                    from .preview import build_preview_graph
+                    result["graph"] = build_preview_graph(source, registry)
+                except Exception as exc:
+                    # Graph preview is best-effort. A runtime-dependent branch may not
+                    # be resolvable from defaults/placeholders, but that must not make
+                    # otherwise valid source impossible to edit.
+                    result["graph_error"] = f"{type(exc).__name__}: {exc}"
         return result
     except (SyntaxError, ValueError, TypeError) as exc:
         return {

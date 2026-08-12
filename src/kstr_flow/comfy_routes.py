@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 from aiohttp import web
 from server import PromptServer
 
 from .analyze import analyze_source
+from .preview import build_preview_graph
 from .registry import get_runtime_registry, input_combo_values
 from .naming import str_to_class_id
 
@@ -14,10 +17,40 @@ async def kstr_flow_analyze(request):
     source = payload.get("source", "")
     if not isinstance(source, str):
         return web.json_response({"ok": False, "error": {"message": "source must be a string"}}, status=400)
-    return web.json_response(analyze_source(source, get_runtime_registry()))
+    # Keep editor diagnostics/socket inference fast and independent from graph
+    # preview execution. The preview has its own bounded endpoint below.
+    return web.json_response(
+        analyze_source(source, get_runtime_registry(), include_preview=False)
+    )
 
 
+@PromptServer.instance.routes.post("/kstr-flow/preview")
+async def kstr_flow_preview(request):
+    payload = await request.json()
+    source = payload.get("source", "")
+    if not isinstance(source, str):
+        return web.json_response({"ok": False, "error": "source must be a string"}, status=400)
 
+    registry = get_runtime_registry()
+    try:
+        # A malformed/custom wrapper must never block Comfy's aiohttp event loop.
+        # Even if a worker thread gets stuck, the request itself has a hard bound.
+        graph = await asyncio.wait_for(
+            asyncio.to_thread(build_preview_graph, source, registry),
+            timeout=5.0,
+        )
+        return web.json_response({"ok": True, "graph": graph, "graph_error": None})
+    except TimeoutError:
+        return web.json_response(
+            {"ok": False, "graph": None, "graph_error": "Preview compilation timed out after 5s"},
+            status=504,
+        )
+    except Exception as exc:
+        return web.json_response({
+            "ok": False,
+            "graph": None,
+            "graph_error": f"{type(exc).__name__}: {exc}",
+        })
 
 
 @PromptServer.instance.routes.get("/kstr-flow/options")
