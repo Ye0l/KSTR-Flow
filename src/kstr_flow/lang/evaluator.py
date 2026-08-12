@@ -5,7 +5,7 @@ import operator
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from comfy_script.runtime.nodes import Node
+from ..graph import Node
 
 from ..registry import FlowOutputs, FlowRegistry, NodeNamespace
 from ..seed import SafeMath, SeededRandom

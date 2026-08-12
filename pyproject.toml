@@ -1,114 +1,21 @@
 [project]
 name = "kstr-flow"
-version = "0.6.1"
-description = "Pythonic text workflows embedded in ComfyUI"
+version = "0.1.0"
+description = "Text-first Pythonic workflows embedded in ComfyUI"
 readme = "README.md"
-# ComfyUI: >=3.8
-# comfyui: >=3.9
-# >=3.6 is required to preserve insertion order of input types
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+license = { file = "LICENSE.txt" }
 authors = [
-  { name="Chaoses-Ib", email="Chaos-es@outlook.com" },
+  { name = "Yeol", email = "casiya03@gmail.com" },
 ]
-keywords = ["comfyui"]
+keywords = ["comfyui", "workflow", "python", "node"]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
 ]
-
-[project.optional-dependencies]
-# There is no mandatory dependencies
-
-client = [
-  # Already required by ComfyUI
-  "aiohttp",
-  # Used by aiohttp
-  "yarl",
-
-  # 1.5.9: https://github.com/erdewit/nest_asyncio/issues/87
-  "nest_asyncio2 ~= 1.0, >= 1.6.3",
-
-  # Already required by ComfyUI
-  "Pillow",
-
-  "aenum ~= 3.1"
-]
-
-# Transpiler
-transpile = [
-  # Already required by ComfyUI (torch)
-  "networkx[default] ~= 3.0",
-
-  # Used to get nodes info
-  "kstr-flow[client]",
-
-  "dynaconf ~= 3.0",
-]
-
-# Runtime
-runtime = [
-  # Already required by ComfyUI
-  "Pillow",
-  "tqdm ~= 4.0",
-
-  "wrapt ~= 1.0",
-
-  "kstr-flow[client]",
-
-  # Used to save script to images
-  "kstr-flow[transpile]",
-]
-
-# Addtional nodes
-# See docs/Nodes/Additional.md for details 
-nodes = [
-  "ComfyUI_Ib_CustomNodes >= 0.2.3",
-  "comfyui-tooling-nodes",
-  "civitai_comfy_nodes",
-]
-
-# Everything except UI (Jupyter and CLI)
-no-ui = [
-  "kstr-flow[client]",
-  "kstr-flow[transpile]",
-  "kstr-flow[runtime]",
-  "kstr-flow[nodes]",
-]
-
-# Jupyter Notebook UI
-jupyter = [
-  "ipywidgets ~= 8.1",
-
-  # Already required by ComfyUI
-  "Pillow",
-
-  "tqdm[notebook] ~= 4.0",
-]
-
-default = [
-  "kstr-flow[no-ui]",
-  "kstr-flow[cli]",
-  "kstr-flow[jupyter]",
-]
-
-# CLI
-# Currently, only transpiler has CLI.
-cli = [
-  "click ~= 8.1",
-]
-
-# Solara UI
-solara = [
-  "solara-ui[markdown] ~= 1.33",
-  # Already required by ComfyUI
-  "Pillow",
-]
-
-all = [
-  "kstr-flow[default]",
-  "kstr-flow[cli]",
-  "comfy-script[solara]",
+dependencies = [
+  "typing_extensions>=4.8",
 ]
 
 [project.urls]
@@ -116,23 +23,15 @@ Homepage = "https://github.com/Ye0l/KSTR-Flow"
 Issues = "https://github.com/Ye0l/KSTR-Flow/issues"
 
 [project.entry-points."comfyui.custom_nodes"]
-# https://github.com/comfyanonymous/ComfyUI/pull/298
 kstr_flow = "kstr_flow.comfy_node"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-# TODO: Exclude docs and examples in sdist?
 
-[tool.hatch.envs.test]
-features = [
-  "default",
-]
-dependencies = [
-  "pytest"
-]
+[tool.hatch.build.targets.wheel]
+packages = ["src/kstr_flow"]
 
 [tool.pytest.ini_options]
-addopts = [
-  "--import-mode=importlib",
-]
+addopts = ["--import-mode=importlib"]
+testpaths = ["tests/kstr_flow"]

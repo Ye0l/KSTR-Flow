@@ -8,9 +8,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
-from comfy_script import astutil
-from comfy_script.runtime import data
-from comfy_script.runtime.nodes import Node, VirtualRuntimeFactory
+from .graph import Node, NodeOutput, is_bool_enum
+from .naming import str_to_class_id
 
 
 _GENERIC_TRAILING = ("customnodes", "customnode", "nodes", "node")
@@ -50,26 +49,26 @@ def normalize_python_module(python_module: str | None) -> str:
 
 
 
-_flow_call_collector: contextvars.ContextVar[list[data.NodeOutput] | None] = contextvars.ContextVar(
+_flow_call_collector: contextvars.ContextVar[list[NodeOutput] | None] = contextvars.ContextVar(
     "kstr_flow_call_collector", default=None
 )
-_flow_output_collector: contextvars.ContextVar[list[data.NodeOutput] | None] = contextvars.ContextVar(
+_flow_output_collector: contextvars.ContextVar[list[NodeOutput] | None] = contextvars.ContextVar(
     "kstr_flow_output_collector", default=None
 )
 
 
 def _root_output(value):
-    if isinstance(value, data.NodeOutput):
+    if isinstance(value, NodeOutput):
         return value
     if isinstance(value, (list, tuple)):
-        return next((item for item in value if isinstance(item, data.NodeOutput)), None)
+        return next((item for item in value if isinstance(item, NodeOutput)), None)
     return None
 
 
 @contextmanager
 def capture_flow_calls():
-    calls: list[data.NodeOutput] = []
-    outputs: list[data.NodeOutput] = []
+    calls: list[NodeOutput] = []
+    outputs: list[NodeOutput] = []
     call_token = _flow_call_collector.set(calls)
     output_token = _flow_output_collector.set(outputs)
     try:
@@ -92,13 +91,13 @@ def _record_flow_call(value, *, output_node: bool = False) -> None:
             outputs.append(root)
 
 
-class FlowSingleOutput(data.NodeOutput):
+class FlowSingleOutput(NodeOutput):
     """A single Comfy output that also exposes its declared name as an attribute."""
 
-    def __init__(self, source: data.NodeOutput, output_name: str):
+    def __init__(self, source: NodeOutput, output_name: str):
         super().__init__(source.node_info, source.node_prompt, source.output_slot)
         self.task = source.task
-        self._output_name = astutil.str_to_class_id(output_name)
+        self._output_name = str_to_class_id(output_name)
 
     def __getattr__(self, name: str):
         if name == self._output_name or name.upper() == self._output_name.upper():
@@ -106,14 +105,14 @@ class FlowSingleOutput(data.NodeOutput):
         raise AttributeError(name)
 
 
-class FlowOutputs(list[data.NodeOutput]):
+class FlowOutputs(list[NodeOutput]):
     """Tuple-unpackable outputs with Comfy return names available as attributes."""
 
-    def __init__(self, values: Iterable[data.NodeOutput], names: Iterable[str]):
+    def __init__(self, values: Iterable[NodeOutput], names: Iterable[str]):
         super().__init__(values)
         self._names: dict[str, int] = {}
         for index, name in enumerate(names):
-            raw = astutil.str_to_class_id(str(name))
+            raw = str_to_class_id(str(name))
             self._names[raw] = index
             self._names[raw.upper()] = index
 
@@ -134,7 +133,7 @@ def _expected_input(info: dict, name: str):
     return None
 
 
-def _node_output_type(value: data.NodeOutput) -> Any:
+def _node_output_type(value: NodeOutput) -> Any:
     slot = value.output_slot
     if slot is None:
         return None
@@ -148,8 +147,10 @@ def _compatible(expected: Any, value: Any) -> bool:
     if expected in (None, "*", "ANY"):
         return True
     if isinstance(expected, (list, tuple)):
+        if isinstance(value, bool) and is_bool_enum(expected):
+            return True
         return value in expected
-    if isinstance(value, data.NodeOutput):
+    if isinstance(value, NodeOutput):
         actual = _node_output_type(value)
         return expected == actual or expected == "*" or actual == "*"
     if expected == "INT":
@@ -168,7 +169,7 @@ def _compatible(expected: Any, value: Any) -> bool:
 
 
 class FlowNode(Node):
-    """ComfyScript virtual node with lightweight pre-graph type validation."""
+    """KSTR Flow virtual node with lightweight pre-graph type validation."""
 
     def __call__(self, *args, **kwargs):
         positional = []
@@ -186,22 +187,17 @@ class FlowNode(Node):
                 continue
             expected = _expected_input(self.info, name)
             if expected is not None and not _compatible(expected, value):
-                actual = _node_output_type(value) if isinstance(value, data.NodeOutput) else type(value).__name__
+                actual = _node_output_type(value) if isinstance(value, NodeOutput) else type(value).__name__
                 raise TypeError(f"{self.info['name']}.{name}: expected {expected!r}, got {actual!r}")
 
         result = super().__call__(*args, **kwargs)
         names = list(self.info.get("output_name") or self.info.get("output") or [])
         if isinstance(result, list):
             result = FlowOutputs(result, names)
-        elif isinstance(result, data.NodeOutput) and result.output_slot is not None and names:
+        elif isinstance(result, NodeOutput) and result.output_slot is not None and names:
             result = FlowSingleOutput(result, names[0])
         _record_flow_call(result, output_node=bool(self.info.get("output_node", False)))
         return result
-
-
-class FlowRuntimeFactory(VirtualRuntimeFactory):
-    def new_node(self, info: dict, defaults: dict, output_types: list[type]):
-        return FlowNode(info, defaults, output_types)
 
 
 class NodeNamespace:
@@ -210,7 +206,7 @@ class NodeNamespace:
         self._nodes: dict[str, Any] = {}
 
     def add(self, raw_name: str, node: Any) -> None:
-        aliases = {raw_name, astutil.str_to_class_id(raw_name)}
+        aliases = {raw_name, str_to_class_id(raw_name)}
         for alias in aliases:
             self._nodes[alias] = node
 
@@ -241,7 +237,6 @@ class RegistryNode:
 
 class FlowRegistry:
     def __init__(self):
-        self.factory = FlowRuntimeFactory()
         self.nodes: dict[str, Any] = {}
         self.namespaces: dict[str, NodeNamespace] = {}
         self.metadata: dict[str, RegistryNode] = {}
@@ -287,8 +282,7 @@ class FlowRegistry:
         for python_module, entries in modules.items():
             namespace = self._module_aliases[python_module]
             for raw_name, info in entries:
-                self.factory.add_node(info)
-                node = self.factory.nodes[raw_name]
+                node = FlowNode(info)
                 self.nodes[raw_name] = node
                 self.namespaces[namespace].add(raw_name, node)
                 self.metadata[raw_name] = RegistryNode(raw_name, namespace, python_module, info)
@@ -307,7 +301,7 @@ class FlowRegistry:
             return self.nodes[name]
         candidates = []
         for raw, node in self.nodes.items():
-            if astutil.str_to_class_id(raw) == name:
+            if str_to_class_id(raw) == name:
                 candidates.append(node)
         if len(candidates) == 1:
             return candidates[0]

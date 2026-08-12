@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from comfy_script.runtime import data
+from .graph import IdManager, NodeOutput, get_outputs_prompt_and_id
 
 from .flow import compile_flow
 from .lang.signature import MISSING, FlowPort
@@ -18,7 +18,7 @@ _PRIMITIVE_DEFAULTS = {
 }
 
 
-class PreviewInput(data.NodeOutput):
+class PreviewInput(NodeOutput):
     def __init__(self, name: str, type_name: str):
         normalized = type_name if type_name and type_name != "ANY" else "*"
         info = {
@@ -49,7 +49,7 @@ def _dedupe_roots(values):
     seen = set()
     roots = []
     for value in values:
-        if not isinstance(value, data.NodeOutput):
+        if not isinstance(value, NodeOutput):
             continue
         marker = id(value.node_prompt)
         if marker in seen:
@@ -64,12 +64,12 @@ def build_preview_graph(source: str, registry: FlowRegistry) -> dict[str, Any]:
     inputs = {port.name: _preview_value(port) for port in program.signature.inputs}
     run = program.run(inputs, global_seed=0)
     returned = run.ordered_outputs()
-    roots = _dedupe_roots((*run.call_roots, *(v for v in returned if isinstance(v, data.NodeOutput))))
+    roots = _dedupe_roots((*run.call_roots, *(v for v in returned if isinstance(v, NodeOutput))))
 
     if roots:
-        prompt, ids = data._get_outputs_prompt_and_id(roots)
+        prompt, ids = get_outputs_prompt_and_id(roots)
     else:
-        prompt, ids = {}, data.IdManager()
+        prompt, ids = {}, IdManager()
 
     graph_nodes: list[dict[str, Any]] = []
     graph_edges: list[dict[str, Any]] = []
@@ -129,7 +129,7 @@ def build_preview_graph(source: str, registry: FlowRegistry) -> dict[str, Any]:
             "label": port.name,
             "namespace": "output",
         })
-        if isinstance(value, data.NodeOutput):
+        if isinstance(value, NodeOutput):
             source_id = ids.get_id(value.node_prompt)
             if source_id is not None:
                 graph_edges.append({

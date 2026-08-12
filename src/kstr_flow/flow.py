@@ -4,7 +4,7 @@ import ast
 from dataclasses import dataclass
 from typing import Any
 
-from comfy_script.runtime import data
+from .graph import NodeOutput
 
 from .lang.evaluator import SafeEvaluator
 from .lang.signature import FlowSignature, parse_signature
@@ -15,15 +15,15 @@ from .registry import FlowRegistry, capture_flow_calls
 class FlowRun:
     result: Any
     global_seed: int
-    call_roots: tuple[data.NodeOutput, ...] = ()
-    output_roots: tuple[data.NodeOutput, ...] = ()
+    call_roots: tuple[NodeOutput, ...] = ()
+    output_roots: tuple[NodeOutput, ...] = ()
 
     def ordered_outputs(self) -> tuple[Any, ...]:
         if self.result is None:
             return ()
         if isinstance(self.result, dict):
             return tuple(self.result.values())
-        if isinstance(self.result, (tuple, list)) and not isinstance(self.result, data.NodeOutput):
+        if isinstance(self.result, (tuple, list)) and not isinstance(self.result, NodeOutput):
             return tuple(self.result)
         return (self.result,)
 

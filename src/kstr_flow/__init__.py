@@ -1,6 +1,6 @@
 """KSTR Flow: a Pythonic workflow language embedded in ComfyUI.
 
-The project reuses ComfyScript's node metadata/runtime machinery while adding a
+KSTR Flow provides its own lightweight ComfyUI graph runtime together with a
 safe evaluator, package namespaces, deterministic seed helpers, and ComfyUI
 node-expansion integration.
 """
