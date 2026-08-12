@@ -21,14 +21,21 @@ import importlib.metadata
 import importlib.util
 import traceback
 
-import nodes
-for entry_point in importlib.metadata.entry_points(group='comfyui_legacy.custom_nodes'):
-    try:
-        spec = importlib.util.find_spec(entry_point.module)
-        nodes.load_custom_node(spec.submodule_search_locations[0])
-    except Exception as e:
-        print(f'ComfyScript: Failed to load legacy custom nodes from {entry_point}: {e}')
-        traceback.print_exc()
+try:
+    import nodes
+except ModuleNotFoundError:
+    # Allow importing/testing KSTR Flow as a normal Python package without a
+    # full ComfyUI checkout. ComfyUI provides this module at extension load.
+    nodes = None
+
+if nodes is not None:
+    for entry_point in importlib.metadata.entry_points(group='comfyui_legacy.custom_nodes'):
+        try:
+            spec = importlib.util.find_spec(entry_point.module)
+            nodes.load_custom_node(spec.submodule_search_locations[0])
+        except Exception as e:
+            print(f'KSTR Flow: Failed to load legacy custom nodes from {entry_point}: {e}')
+            traceback.print_exc()
 
 if success:
     print('\033[34mComfyScript: \033[92mLoaded\033[0m')

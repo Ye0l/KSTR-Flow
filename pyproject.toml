@@ -1,7 +1,7 @@
 [project]
-name = "comfy-script"
+name = "kstr-flow"
 version = "0.6.1"
-description = "A Python frontend and library for ComfyUI"
+description = "Pythonic text workflows embedded in ComfyUI"
 readme = "README.md"
 # ComfyUI: >=3.8
 # comfyui: >=3.9
@@ -41,7 +41,7 @@ transpile = [
   "networkx[default] ~= 3.0",
 
   # Used to get nodes info
-  "comfy-script[client]",
+  "kstr-flow[client]",
 
   "dynaconf ~= 3.0",
 ]
@@ -54,10 +54,10 @@ runtime = [
 
   "wrapt ~= 1.0",
 
-  "comfy-script[client]",
+  "kstr-flow[client]",
 
   # Used to save script to images
-  "comfy-script[transpile]",
+  "kstr-flow[transpile]",
 ]
 
 # Addtional nodes
@@ -70,10 +70,10 @@ nodes = [
 
 # Everything except UI (Jupyter and CLI)
 no-ui = [
-  "comfy-script[client]",
-  "comfy-script[transpile]",
-  "comfy-script[runtime]",
-  "comfy-script[nodes]",
+  "kstr-flow[client]",
+  "kstr-flow[transpile]",
+  "kstr-flow[runtime]",
+  "kstr-flow[nodes]",
 ]
 
 # Jupyter Notebook UI
@@ -87,9 +87,9 @@ jupyter = [
 ]
 
 default = [
-  "comfy-script[no-ui]",
-  "comfy-script[cli]",
-  "comfy-script[jupyter]",
+  "kstr-flow[no-ui]",
+  "kstr-flow[cli]",
+  "kstr-flow[jupyter]",
 ]
 
 # CLI
@@ -106,18 +106,18 @@ solara = [
 ]
 
 all = [
-  "comfy-script[default]",
-  "comfy-script[cli]",
+  "kstr-flow[default]",
+  "kstr-flow[cli]",
   "comfy-script[solara]",
 ]
 
 [project.urls]
-Homepage = "https://github.com/Chaoses-Ib/ComfyScript"
-Issues = "https://github.com/Chaoses-Ib/ComfyScript/issues"
+Homepage = "https://github.com/Ye0l/KSTR-Flow"
+Issues = "https://github.com/Ye0l/KSTR-Flow/issues"
 
 [project.entry-points."comfyui.custom_nodes"]
 # https://github.com/comfyanonymous/ComfyUI/pull/298
-comfy_script = "comfy_script.nodes"
+kstr_flow = "comfy_script.nodes"
 
 [build-system]
 requires = ["hatchling"]

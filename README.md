@@ -1,3 +1,11 @@
+# KSTR Flow
+
+A Pythonic, text-first workflow layer for ComfyUI, forked from [ComfyScript](https://github.com/Chaoses-Ib/ComfyScript). KSTR Flow keeps ComfyScript's node discovery and virtual graph machinery while adding safe in-node scripting, pack namespaces, deterministic global seeds, dynamic I/O, and a code/graph UI.
+
+> Development status: early prototype. The original ComfyScript documentation is retained below while the KSTR Flow interface is being built.
+
+---
+
 # ComfyScript
 [![PyPI - Version](https://img.shields.io/pypi/v/comfy-script)](https://pypi.org/project/comfy-script) ![Python Version from PEP 621 TOML](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2FChaoses-Ib%2FComfyScript%2Fmain%2Fpyproject.toml) [![License](https://img.shields.io/pypi/l/comfy-script)](LICENSE.txt)
 
