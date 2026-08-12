@@ -64,3 +64,33 @@ def test_arbitrary_import_and_dunder_are_blocked(registry):
 def test_reserved_seed_cannot_be_external_port(registry):
     with pytest.raises(SyntaxError, match="reserved"):
         compile_flow("def workflow(seed: INT):\n    return seed", registry)
+
+
+def test_match_case(registry):
+    source = '''
+def workflow():
+    mode = "quality"
+    match mode:
+        case "fast":
+            steps = 12
+        case "quality":
+            steps = 32
+        case _:
+            steps = 20
+    return steps
+'''
+    assert compile_flow(source, registry).run().result == 32
+
+
+def test_output_node_call_is_captured_without_return(registry):
+    source = '''
+import debug
+
+def workflow():
+    debug.DebugOutput("hello")
+    return 7
+'''
+    run = compile_flow(source, registry).run()
+    assert run.result == 7
+    assert len(run.output_roots) == 1
+    assert run.output_roots[0].node_info["name"] == "DebugOutput"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import keyword
+import contextvars
+from contextlib import contextmanager
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -44,6 +46,50 @@ def normalize_python_module(python_module: str | None) -> str:
     # object_info may contain a submodule. The custom-node directory is the pack.
     pack = re.split(r"[./]", module, maxsplit=1)[0]
     return _identifier(pack)
+
+
+
+
+_flow_call_collector: contextvars.ContextVar[list[data.NodeOutput] | None] = contextvars.ContextVar(
+    "kstr_flow_call_collector", default=None
+)
+_flow_output_collector: contextvars.ContextVar[list[data.NodeOutput] | None] = contextvars.ContextVar(
+    "kstr_flow_output_collector", default=None
+)
+
+
+def _root_output(value):
+    if isinstance(value, data.NodeOutput):
+        return value
+    if isinstance(value, (list, tuple)):
+        return next((item for item in value if isinstance(item, data.NodeOutput)), None)
+    return None
+
+
+@contextmanager
+def capture_flow_calls():
+    calls: list[data.NodeOutput] = []
+    outputs: list[data.NodeOutput] = []
+    call_token = _flow_call_collector.set(calls)
+    output_token = _flow_output_collector.set(outputs)
+    try:
+        yield calls, outputs
+    finally:
+        _flow_call_collector.reset(call_token)
+        _flow_output_collector.reset(output_token)
+
+
+def _record_flow_call(value, *, output_node: bool = False) -> None:
+    root = _root_output(value)
+    if root is None:
+        return
+    calls = _flow_call_collector.get()
+    if calls is not None:
+        calls.append(root)
+    if output_node:
+        outputs = _flow_output_collector.get()
+        if outputs is not None:
+            outputs.append(root)
 
 
 class FlowSingleOutput(data.NodeOutput):
@@ -146,9 +192,10 @@ class FlowNode(Node):
         result = super().__call__(*args, **kwargs)
         names = list(self.info.get("output_name") or self.info.get("output") or [])
         if isinstance(result, list):
-            return FlowOutputs(result, names)
-        if isinstance(result, data.NodeOutput) and result.output_slot is not None and names:
-            return FlowSingleOutput(result, names[0])
+            result = FlowOutputs(result, names)
+        elif isinstance(result, data.NodeOutput) and result.output_slot is not None and names:
+            result = FlowSingleOutput(result, names[0])
+        _record_flow_call(result, output_node=bool(self.info.get("output_node", False)))
         return result
 
 

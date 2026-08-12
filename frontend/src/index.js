@@ -259,28 +259,175 @@ function makeShell() {
   return { root, preview, editorHost };
 }
 
+function graphLayout(graph) {
+  const nodes = graph?.nodes ?? [];
+  const edges = graph?.edges ?? [];
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const indegree = new Map(nodes.map((node) => [node.id, 0]));
+  const outgoing = new Map(nodes.map((node) => [node.id, []]));
+  for (const edge of edges) {
+    if (!byId.has(edge.from) || !byId.has(edge.to)) continue;
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+    outgoing.get(edge.from)?.push(edge.to);
+  }
+
+  const layer = new Map(nodes.map((node) => [node.id, 0]));
+  const queue = nodes.filter((node) => (indegree.get(node.id) ?? 0) === 0).map((node) => node.id);
+  let cursor = 0;
+  while (cursor < queue.length) {
+    const id = queue[cursor++];
+    for (const next of outgoing.get(id) ?? []) {
+      layer.set(next, Math.max(layer.get(next) ?? 0, (layer.get(id) ?? 0) + 1));
+      indegree.set(next, (indegree.get(next) ?? 1) - 1);
+      if (indegree.get(next) === 0) queue.push(next);
+    }
+  }
+
+  // Cyclic/unresolved nodes still need a deterministic place.
+  const unresolved = nodes.filter((node) => !queue.includes(node.id));
+  for (const node of unresolved) layer.set(node.id, layer.get(node.id) ?? 0);
+
+  const groups = new Map();
+  for (const node of nodes) {
+    const value = layer.get(node.id) ?? 0;
+    if (!groups.has(value)) groups.set(value, []);
+    groups.get(value).push(node);
+  }
+
+  const positions = new Map();
+  const nodeWidth = 154;
+  const nodeHeight = 42;
+  const xGap = 52;
+  const yGap = 14;
+  let maxLayer = 0;
+  let maxRows = 1;
+  for (const [layerIndex, group] of groups) {
+    maxLayer = Math.max(maxLayer, layerIndex);
+    maxRows = Math.max(maxRows, group.length);
+    group.sort((a, b) => a.label.localeCompare(b.label));
+    group.forEach((node, row) => {
+      positions.set(node.id, {
+        x: 16 + layerIndex * (nodeWidth + xGap),
+        y: 24 + row * (nodeHeight + yGap),
+        width: nodeWidth,
+        height: nodeHeight,
+      });
+    });
+  }
+
+  return {
+    positions,
+    width: 32 + (maxLayer + 1) * nodeWidth + maxLayer * xGap,
+    height: 48 + maxRows * nodeHeight + Math.max(0, maxRows - 1) * yGap,
+  };
+}
+
+function svgEl(name, attrs = {}) {
+  const el = document.createElementNS("http://www.w3.org/2000/svg", name);
+  for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, String(value));
+  return el;
+}
+
+function renderGraph(preview, graph) {
+  preview.replaceChildren();
+  if (!graph?.nodes?.length) {
+    const empty = document.createElement("div");
+    empty.textContent = "Graph preview · no Comfy nodes on the default path";
+    Object.assign(empty.style, { opacity: ".6", font: "12px ui-monospace,monospace" });
+    preview.append(empty);
+    return;
+  }
+
+  const { positions, width, height } = graphLayout(graph);
+  const svg = svgEl("svg", { width, height, viewBox: `0 0 ${width} ${height}` });
+  Object.assign(svg.style, { display: "block", minWidth: `${width}px`, minHeight: `${height}px` });
+
+  const edgesGroup = svgEl("g", { fill: "none", stroke: "currentColor", "stroke-opacity": ".28", "stroke-width": "1.25" });
+  for (const edge of graph.edges ?? []) {
+    const from = positions.get(edge.from);
+    const to = positions.get(edge.to);
+    if (!from || !to) continue;
+    const x1 = from.x + from.width;
+    const y1 = from.y + from.height / 2;
+    const x2 = to.x;
+    const y2 = to.y + to.height / 2;
+    const bend = Math.max(24, (x2 - x1) * 0.48);
+    const path = svgEl("path", { d: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}` });
+    const title = svgEl("title");
+    title.textContent = edge.to_input ? `${edge.to_input}` : "connection";
+    path.append(title);
+    edgesGroup.append(path);
+  }
+  svg.append(edgesGroup);
+
+  for (const node of graph.nodes) {
+    const pos = positions.get(node.id);
+    if (!pos) continue;
+    const group = svgEl("g", { transform: `translate(${pos.x},${pos.y})` });
+    const isBoundary = node.kind === "input" || node.kind === "output";
+    const rect = svgEl("rect", {
+      width: pos.width,
+      height: pos.height,
+      rx: 6,
+      fill: isBoundary ? "rgba(127,127,127,.10)" : "rgba(127,127,127,.16)",
+      stroke: "currentColor",
+      "stroke-opacity": isBoundary ? ".28" : ".42",
+    });
+    group.append(rect);
+
+    const title = svgEl("title");
+    title.textContent = node.kind === "node"
+      ? `${node.namespace}.${node.class_type}${node.category ? `\n${node.category}` : ""}`
+      : `${node.kind}: ${node.label} (${node.type || "*"})`;
+    rect.append(title);
+
+    const label = svgEl("text", { x: 9, y: 17, fill: "currentColor", "font-size": "11", "font-family": "ui-monospace,monospace" });
+    const shown = node.label.length > 22 ? `${node.label.slice(0, 21)}…` : node.label;
+    label.textContent = shown;
+    group.append(label);
+
+    const sub = svgEl("text", { x: 9, y: 32, fill: "currentColor", "fill-opacity": ".52", "font-size": "9.5", "font-family": "ui-monospace,monospace" });
+    sub.textContent = node.kind === "node" ? node.namespace : `${node.kind.toUpperCase()} · ${node.type || "*"}`;
+    group.append(sub);
+    svg.append(group);
+  }
+
+  preview.append(svg);
+}
+
 function renderPreview(state) {
   const { preview, analysis } = state;
+  preview.replaceChildren();
   if (!analysis) {
-    preview.innerHTML = `<div style="opacity:.6;font:12px ui-monospace,monospace">Graph preview · waiting for analysis</div>`;
+    const waiting = document.createElement("div");
+    waiting.textContent = "Graph preview · waiting for analysis";
+    Object.assign(waiting.style, { opacity: ".6", font: "12px ui-monospace,monospace" });
+    preview.append(waiting);
     return;
   }
   if (!analysis.ok) {
-    preview.innerHTML = `<div style="color:#e57373;font:12px ui-monospace,monospace">${escapeHtml(analysis.error?.message || "Syntax error")}</div>`;
+    const error = document.createElement("div");
+    error.textContent = analysis.error?.message || "Syntax error";
+    Object.assign(error.style, { color: "#e57373", font: "12px ui-monospace,monospace" });
+    preview.append(error);
     return;
   }
-  const inputText = (analysis.inputs ?? []).map((p) => `${p.name}:${p.type}`).join(" · ") || "no external inputs";
-  const outputText = (analysis.outputs ?? []).map((p) => `${p.name}:${p.type}`).join(" · ") || "no outputs";
-  preview.innerHTML = `
-    <div style="display:flex;flex-direction:column;gap:7px;font:12px ui-monospace,monospace">
-      <div style="opacity:.65">Graph preview · graph IR next</div>
-      <div><b>IN</b> ${escapeHtml(inputText)}</div>
-      <div><b>OUT</b> ${escapeHtml(outputText)}</div>
-    </div>`;
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>'"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[ch]));
+  renderGraph(preview, analysis.graph);
+  if (analysis.graph_error) {
+    const warning = document.createElement("div");
+    warning.textContent = `Preview: ${analysis.graph_error}`;
+    Object.assign(warning.style, {
+      position: "sticky",
+      left: "0",
+      bottom: "0",
+      display: "inline-block",
+      padding: "3px 6px",
+      font: "10px ui-monospace,monospace",
+      background: "rgba(25,25,28,.88)",
+      opacity: ".75",
+    });
+    preview.append(warning);
+  }
 }
 
 async function analyze(node) {

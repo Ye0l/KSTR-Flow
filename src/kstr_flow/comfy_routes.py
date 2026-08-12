@@ -13,7 +13,7 @@ async def kstr_flow_analyze(request):
     source = payload.get("source", "")
     if not isinstance(source, str):
         return web.json_response({"ok": False, "error": {"message": "source must be a string"}}, status=400)
-    return web.json_response(analyze_source(source))
+    return web.json_response(analyze_source(source, get_runtime_registry()))
 
 
 @PromptServer.instance.routes.get("/kstr-flow/registry")

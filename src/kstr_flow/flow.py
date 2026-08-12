@@ -8,13 +8,15 @@ from comfy_script.runtime import data
 
 from .lang.evaluator import SafeEvaluator
 from .lang.signature import FlowSignature, parse_signature
-from .registry import FlowRegistry
+from .registry import FlowRegistry, capture_flow_calls
 
 
 @dataclass
 class FlowRun:
     result: Any
     global_seed: int
+    call_roots: tuple[data.NodeOutput, ...] = ()
+    output_roots: tuple[data.NodeOutput, ...] = ()
 
     def ordered_outputs(self) -> tuple[Any, ...]:
         if self.result is None:
@@ -47,7 +49,9 @@ class FlowProgram:
         for port in self.signature.inputs:
             if port.name in inputs:
                 kwargs[port.name] = inputs[port.name]
-        return FlowRun(workflow(**kwargs), int(global_seed))
+        with capture_flow_calls() as (calls, output_nodes):
+            result = workflow(**kwargs)
+        return FlowRun(result, int(global_seed), tuple(calls), tuple(output_nodes))
 
 
 def compile_flow(source: str, registry: FlowRegistry) -> FlowProgram:

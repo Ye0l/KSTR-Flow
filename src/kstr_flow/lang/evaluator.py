@@ -186,6 +186,20 @@ class SafeEvaluator:
             else:
                 self.exec_block(node.orelse, env)
             return
+        if isinstance(node, ast.Match):
+            subject = self.eval_expr(node.subject, env)
+            for case in node.cases:
+                captures: dict[str, Any] = {}
+                if not self.match_pattern(case.pattern, subject, env, captures):
+                    continue
+                # Python match/case is block-like syntactically but does not create
+                # a new local scope. Captures and assignments remain visible.
+                env.update(captures)
+                if case.guard is not None and not self.eval_expr(case.guard, env):
+                    continue
+                self.exec_block(case.body, env)
+                return
+            return
         if isinstance(node, ast.Break):
             raise _Break()
         if isinstance(node, ast.Continue):
@@ -213,6 +227,77 @@ class SafeEvaluator:
         if isinstance(node, ast.Pass):
             return
         raise FlowSecurityError(f"Unsupported statement: {type(node).__name__}")
+
+    def match_pattern(self, pattern: ast.pattern, subject: Any, env: Env, captures: dict[str, Any]) -> bool:
+        if isinstance(pattern, ast.MatchValue):
+            return subject == self.eval_expr(pattern.value, env)
+        if isinstance(pattern, ast.MatchSingleton):
+            return subject is pattern.value
+        if isinstance(pattern, ast.MatchAs):
+            if pattern.pattern is not None and not self.match_pattern(pattern.pattern, subject, env, captures):
+                return False
+            if pattern.name is not None:
+                captures[pattern.name] = subject
+            return True
+        if isinstance(pattern, ast.MatchOr):
+            for child in pattern.patterns:
+                branch: dict[str, Any] = {}
+                if self.match_pattern(child, subject, env, branch):
+                    captures.update(branch)
+                    return True
+            return False
+        if isinstance(pattern, ast.MatchSequence):
+            if isinstance(subject, (str, bytes)):
+                return False
+            try:
+                values = list(subject)
+            except TypeError:
+                return False
+            star_indexes = [i for i, child in enumerate(pattern.patterns) if isinstance(child, ast.MatchStar)]
+            if len(star_indexes) > 1:
+                raise FlowSecurityError("Only one starred match item is allowed")
+            if not star_indexes:
+                if len(values) != len(pattern.patterns):
+                    return False
+                pairs = zip(pattern.patterns, values)
+                for child, value in pairs:
+                    if not self.match_pattern(child, value, env, captures):
+                        return False
+                return True
+            star = star_indexes[0]
+            before = pattern.patterns[:star]
+            after = pattern.patterns[star + 1:]
+            if len(values) < len(before) + len(after):
+                return False
+            for child, value in zip(before, values[:len(before)]):
+                if not self.match_pattern(child, value, env, captures):
+                    return False
+            if after:
+                for child, value in zip(after, values[-len(after):]):
+                    if not self.match_pattern(child, value, env, captures):
+                        return False
+            star_pattern = pattern.patterns[star]
+            if star_pattern.name is not None:
+                end = len(values) - len(after) if after else len(values)
+                captures[star_pattern.name] = values[len(before):end]
+            return True
+        if isinstance(pattern, ast.MatchMapping):
+            if not isinstance(subject, dict):
+                return False
+            used = set()
+            for key_node, child in zip(pattern.keys, pattern.patterns):
+                key = self.eval_expr(key_node, env)
+                if key not in subject or not self.match_pattern(child, subject[key], env, captures):
+                    return False
+                used.add(key)
+            if pattern.rest is not None:
+                captures[pattern.rest] = {k: v for k, v in subject.items() if k not in used}
+            return True
+        if isinstance(pattern, ast.MatchStar):
+            if pattern.name is not None:
+                captures[pattern.name] = subject
+            return True
+        raise FlowSecurityError(f"Unsupported match pattern: {type(pattern).__name__}")
 
     def assign(self, target: ast.expr, value: Any, env: Env):
         if isinstance(target, ast.Name):

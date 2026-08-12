@@ -74,7 +74,7 @@ class KSTRFlowNode(io.ComfyNode):
         if len(outputs) > MAX_OUTPUTS:
             raise RuntimeError(f"KSTR Flow produced {len(outputs)} outputs; maximum is {MAX_OUTPUTS}")
 
-        expansion = to_comfy_expansion(outputs)
+        expansion = to_comfy_expansion(outputs, roots=(*outputs, *run.output_roots))
         padded = tuple(expansion["result"]) + (None,) * (MAX_OUTPUTS - len(outputs))
         return io.NodeOutput(*padded, expand=expansion["expand"])
 

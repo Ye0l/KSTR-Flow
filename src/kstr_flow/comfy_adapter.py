@@ -9,7 +9,7 @@ def _normalize_outputs(values: Iterable[Any]) -> tuple[Any, ...]:
     return tuple(values)
 
 
-def to_comfy_expansion(values: Iterable[Any]) -> dict:
+def to_comfy_expansion(values: Iterable[Any], *, roots: Iterable[Any] | None = None) -> dict:
     """Convert KSTR/ComfyScript outputs to a ComfyUI node-expansion return value.
 
     Imports ComfyUI lazily so the language/compiler remains unit-testable without a
@@ -19,9 +19,19 @@ def to_comfy_expansion(values: Iterable[Any]) -> dict:
     from comfy_execution.graph_utils import GraphBuilder, add_graph_prefix
 
     outputs = _normalize_outputs(values)
-    node_outputs = [v for v in outputs if isinstance(v, data.NodeOutput)]
-    if node_outputs:
-        prompt, ids = data._get_outputs_prompt_and_id(node_outputs)
+    root_values = tuple(roots) if roots is not None else outputs
+    node_roots: list[data.NodeOutput] = []
+    seen_prompts: set[int] = set()
+    for value in (*root_values, *outputs):
+        if not isinstance(value, data.NodeOutput):
+            continue
+        marker = id(value.node_prompt)
+        if marker in seen_prompts:
+            continue
+        seen_prompts.add(marker)
+        node_roots.append(value)
+    if node_roots:
+        prompt, ids = data._get_outputs_prompt_and_id(node_roots)
     else:
         prompt, ids = {}, data.IdManager()
 
