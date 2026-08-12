@@ -1,13 +1,13 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-import { autocompletion } from "@codemirror/autocomplete";
+import { autocompletion, completionKeymap } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { python } from "@codemirror/lang-python";
 import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { setDiagnostics } from "@codemirror/lint";
 import { searchKeymap } from "@codemirror/search";
-import { EditorState } from "@codemirror/state";
+import { EditorState, Prec } from "@codemirror/state";
 import {
   EditorView,
   drawSelection,
@@ -29,6 +29,7 @@ const BUILTINS = [
 const RESERVED = ["global_seed", "seed", "random", "math", "nodes"];
 
 let registryPromise = null;
+const optionPromises = new Map();
 
 function sourceWidget(node) {
   return node.widgets?.find((widget) => widget.name === "source");
@@ -90,6 +91,21 @@ function syncOutputs(node, ports) {
     }
   }
   while ((node.outputs?.length ?? 0) > ports.length) node.removeOutput(node.outputs.length - 1);
+}
+
+async function loadInputOptions(pack, nodeName, inputName) {
+  const key = `${pack}\0${nodeName}\0${inputName}`;
+  if (!optionPromises.has(key)) {
+    const params = new URLSearchParams({ pack, node: nodeName, input: inputName });
+    optionPromises.set(key, api.fetchApi(`/kstr-flow/options?${params}`)
+      .then((response) => {
+        if (!response.ok) throw new Error(`options HTTP ${response.status}`);
+        return response.json();
+      })
+      .then((payload) => Array.isArray(payload.options) ? payload.options : [])
+      .catch((error) => { optionPromises.delete(key); throw error; }));
+  }
+  return optionPromises.get(key);
 }
 
 async function loadRegistry() {
@@ -210,7 +226,7 @@ function findCallAtCursor(textBefore, registry) {
   const node = registry.packs?.[pack]?.find((item) =>
     (item.call_name || item.name) === match[2] || item.name === match[2]
   );
-  return node ? { node, fragment: match[3] } : null;
+  return node ? { node, pack, fragment: match[3] } : null;
 }
 
 async function kstrCompletion(context) {
@@ -252,6 +268,41 @@ async function kstrCompletion(context) {
 
   const call = findCallAtCursor(before, registry);
   if (call) {
+    // If the cursor is inside a keyword value, offer the node's actual COMBO
+    // values. Large lists (checkpoints/LoRAs/etc.) are fetched lazily.
+    const valueMatch = call.fragment.match(/(?:^|,)\s*([A-Za-z_]\w*)\s*=\s*(["']?)([^,"']*)$/s);
+    if (valueMatch) {
+      const inputName = valueMatch[1];
+      const quote = valueMatch[2];
+      const typed = valueMatch[3] || "";
+      const input = call.node.inputs.find((item) => item.name === inputName);
+      if (input && (input.options?.length || input.option_count)) {
+        let values = input.options ?? [];
+        if (!values.length && input.option_count) {
+          try { values = await loadInputOptions(call.pack, call.node.call_name || call.node.name, inputName); } catch { values = []; }
+        }
+        const from = context.pos - typed.length;
+        const escapeQuoted = (value) => String(value).replaceAll("\\", "\\\\").replaceAll(quote || '"', `\\${quote || '"'}`);
+        return {
+          from,
+          options: values.map((value) => {
+            const isString = typeof value === "string";
+            let apply;
+            if (quote && isString) apply = `${escapeQuoted(value)}${quote}`;
+            else apply = JSON.stringify(value);
+            return {
+              label: String(value),
+              displayLabel: String(value),
+              type: isString ? "text" : "constant",
+              detail: `${call.node.display_name || call.node.name}.${inputName}`,
+              apply,
+            };
+          }),
+          validFor: /^[^,)]*$/,
+        };
+      }
+    }
+
     const used = new Set([...call.fragment.matchAll(/\b([A-Za-z_]\w*)\s*=/g)].map((m) => m[1]));
     const word = context.matchBefore(/[A-Za-z_]*$/);
     const options = call.node.inputs
@@ -870,7 +921,8 @@ function install(node) {
       bracketMatching(),
       highlightActiveLine(),
       python(),
-      autocompletion({ override: [kstrCompletion], activateOnTyping: true }),
+      autocompletion({ override: [kstrCompletion], activateOnTyping: true, defaultKeymap: false }),
+      Prec.highest(keymap.of(completionKeymap)),
       keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
       editorTheme,
       EditorView.updateListener.of((update) => {
@@ -882,6 +934,13 @@ function install(node) {
     ],
   });
   state.view = new EditorView({ state: editorState, parent: shell.editorHost });
+
+  // Comfy/LiteGraph installs canvas-level input handlers. Keep editor and
+  // completion-list interaction inside the DOM widget so arrows/Enter/clicks
+  // are not reinterpreted as canvas actions.
+  for (const eventName of ["keydown", "keyup", "pointerdown", "pointerup", "mousedown", "mouseup", "click", "wheel"]) {
+    shell.editorHost.addEventListener(eventName, (event) => event.stopPropagation());
+  }
 
   shell.nodesButton.addEventListener("click", () => {
     if (state.browserOpen) closeNodeBrowser(state);

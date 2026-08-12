@@ -4,7 +4,7 @@ from aiohttp import web
 from server import PromptServer
 
 from .analyze import analyze_source
-from .registry import get_runtime_registry
+from .registry import get_runtime_registry, input_combo_values
 from .naming import str_to_class_id
 
 
@@ -15,6 +15,20 @@ async def kstr_flow_analyze(request):
     if not isinstance(source, str):
         return web.json_response({"ok": False, "error": {"message": "source must be a string"}}, status=400)
     return web.json_response(analyze_source(source, get_runtime_registry()))
+
+
+
+
+
+@PromptServer.instance.routes.get("/kstr-flow/options")
+async def kstr_flow_options(request):
+    pack = request.query.get("pack", "")
+    node_name = request.query.get("node", "")
+    input_name = request.query.get("input", "")
+    if not pack or not node_name or not input_name:
+        return web.json_response({"options": []}, status=400)
+    values = input_combo_values(get_runtime_registry(), pack, node_name, input_name)
+    return web.json_response({"options": values})
 
 
 @PromptServer.instance.routes.get("/kstr-flow/registry")

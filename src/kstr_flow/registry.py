@@ -343,6 +343,28 @@ class FlowRegistry:
         raise NameError(f"Ambiguous ComfyUI node name: {name}; import its pack namespace")
 
 
+
+def input_combo_values(registry: FlowRegistry, pack: str, node_name: str, input_name: str):
+    """Return raw COMBO values for one input without bloating the registry payload."""
+    for raw_name, meta in registry.metadata.items():
+        if meta.namespace != pack:
+            continue
+        info = meta.info or {}
+        call_name = str_to_class_id(raw_name)
+        if node_name not in (raw_name, call_name):
+            continue
+        input_info = info.get("input") or {}
+        for group in ("required", "optional"):
+            entry = (input_info.get(group) or {}).get(input_name)
+            if not isinstance(entry, (list, tuple)) or not entry:
+                continue
+            declared = entry[0]
+            if not isinstance(declared, (list, tuple)):
+                return []
+            return [value for value in declared if isinstance(value, (str, int, float, bool)) or value is None]
+        return []
+    return []
+
 def collect_comfy_object_info() -> dict[str, dict]:
     """Collect `/object_info`-equivalent metadata inside a running ComfyUI process.
 

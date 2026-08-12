@@ -45,3 +45,10 @@ def test_core_and_pack_submodules_share_namespace():
     assert registry.metadata["CoreC"].namespace == "comfy"
     assert registry.metadata["ImpactA"].namespace == "impactpack"
     assert registry.metadata["ImpactB"].namespace == "impactpack"
+
+
+def test_large_combo_values_are_available_on_demand(registry):
+    from kstr_flow.registry import input_combo_values
+
+    registry.metadata["CheckpointLoaderSimple"].info["input"]["required"]["ckpt_name"] = (["a.safetensors", "b.safetensors"], {})
+    assert input_combo_values(registry, "comfy", "CheckpointLoaderSimple", "ckpt_name") == ["a.safetensors", "b.safetensors"]
