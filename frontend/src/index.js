@@ -23,6 +23,7 @@ import {
 import { tags } from "@lezer/highlight";
 
 const FLOW_CLASS = "KSTRFlow";
+const FRONTEND_BUILD = "2026-08-12.2235";
 const STATE = Symbol("kstrFlowState");
 const ROOT_STATE = Symbol("kstrFlowRootState");
 const STATIC_INPUTS = new Set(["source", "global_seed"]);
@@ -656,7 +657,6 @@ function makeShell() {
     color: "var(--fg-color, #ddd)",
   });
   const previewHeader = document.createElement("div");
-  previewHeader.textContent = "Graph Preview";
   Object.assign(previewHeader.style, {
     display: "flex",
     alignItems: "center",
@@ -666,6 +666,20 @@ function makeShell() {
     opacity: ".72",
     font: "10px ui-sans-serif,system-ui,sans-serif",
   });
+  const previewTitle = document.createElement("span");
+  previewTitle.textContent = "Graph Preview";
+  const previewStatus = document.createElement("span");
+  previewStatus.textContent = `idle · ${FRONTEND_BUILD}`;
+  Object.assign(previewStatus.style, { marginLeft: "auto", opacity: ".58", font: "9px ui-monospace,monospace" });
+  const previewRefresh = document.createElement("button");
+  previewRefresh.type = "button";
+  previewRefresh.textContent = "↻";
+  previewRefresh.title = "Re-analyze graph preview";
+  Object.assign(previewRefresh.style, {
+    width: "22px", height: "20px", padding: "0", border: "1px solid rgba(127,127,127,.25)",
+    borderRadius: "3px", background: "transparent", color: "inherit", cursor: "pointer", lineHeight: "18px",
+  });
+  previewHeader.append(previewTitle, previewStatus, previewRefresh);
   const preview = document.createElement("div");
   preview.className = "kstr-flow-preview";
   Object.assign(preview.style, {
@@ -786,7 +800,7 @@ function makeShell() {
   editorPane.append(toolbar, editorHost, browser);
   root.append(previewPane, divider, editorPane);
   return {
-    root, preview, editorHost, nodesButton, browser, browserSearch: search, browserClose: close,
+    root, preview, previewStatus, previewRefresh, editorHost, nodesButton, browser, browserSearch: search, browserClose: close,
     browserPacks: packs, browserResults: results,
   };
 }
@@ -1134,12 +1148,17 @@ function closeNodeBrowser(state) {
   state.view?.focus();
 }
 
+function setPreviewStatus(state, status) {
+  if (state?.shell?.previewStatus) state.shell.previewStatus.textContent = `${status} · ${FRONTEND_BUILD}`;
+}
+
 async function analyzeState(node, state) {
   if (!state?.view || state.destroyed) return;
   const source = state.view.state.doc.toString();
   const generation = ++state.generation;
   state.analysis = null;
   state.error = null;
+  setPreviewStatus(state, "analyzing");
   renderPreview(state);
 
   const requestController = new AbortController();
@@ -1167,6 +1186,7 @@ async function analyzeState(node, state) {
       syncOutputs(node, result.outputs ?? []);
     }
     setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
+    setPreviewStatus(state, result.ok ? "ready" : "error");
     renderPreview(state);
     node.setDirtyCanvas?.(true, true);
   } catch (error) {
@@ -1177,6 +1197,7 @@ async function analyzeState(node, state) {
     state.error = { message, line: 1, column: 1 };
     state.analysis = { ok: false, error: state.error, graph: null, graph_error: null, symbols: {} };
     setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
+    setPreviewStatus(state, "error");
     renderPreview(state);
     console.error("[KSTR Flow] analysis failed", error);
   } finally {
@@ -1188,6 +1209,7 @@ async function analyzeState(node, state) {
 function scheduleAnalyze(node, state = node[STATE], delay = 180) {
   if (!state || state.destroyed) return;
   clearTimeout(state.timer);
+  setPreviewStatus(state, "scheduled");
   state.timer = setTimeout(() => {
     if (!state.destroyed) void analyzeState(node, state);
   }, delay);
@@ -1296,6 +1318,11 @@ function install(node) {
     shell.preview.addEventListener(eventName, (event) => event.stopPropagation(), { signal });
   }
   shell.preview.addEventListener("pointerdown", () => shell.preview.focus({ preventScroll: true }), { signal });
+  shell.previewRefresh.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void analyzeState(node, state);
+  }, { signal });
 
   shell.nodesButton.addEventListener("click", () => {
     if (state.browserOpen) closeNodeBrowser(state);
