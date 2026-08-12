@@ -20,6 +20,7 @@ import {
 
 const FLOW_CLASS = "KSTRFlow";
 const STATE = Symbol("kstrFlowState");
+const STATIC_INPUTS = new Set(["source", "global_seed"]);
 const BUILTINS = [
   "abs", "all", "any", "bool", "dict", "enumerate", "filter", "float",
   "int", "len", "list", "map", "max", "min", "range", "reversed",
@@ -48,14 +49,14 @@ function normalizeType(type) {
 }
 
 function findDynamicInput(node, name) {
-  return node.inputs?.find((slot) => slot?._kstrFlow && slot.name === name);
+  return node.inputs?.find((slot) => slot?.name === name);
 }
 
 function syncInputs(node, ports) {
   const wanted = new Set(ports.map((port) => port.name));
   for (let index = (node.inputs?.length ?? 0) - 1; index >= 0; index--) {
     const slot = node.inputs[index];
-    if (slot?._kstrFlow && !wanted.has(slot.name)) node.removeInput(index);
+    if (slot && !STATIC_INPUTS.has(slot.name) && !wanted.has(slot.name)) node.removeInput(index);
   }
 
   for (const port of ports) {
@@ -67,6 +68,7 @@ function syncInputs(node, ports) {
       slot._kstrFlow = true;
     } else {
       slot.type = type;
+      slot._kstrFlow = true;
     }
     slot.label = port.name;
   }
@@ -468,6 +470,15 @@ function scheduleAnalyze(node, delay = 180) {
   state.timer = setTimeout(() => analyze(node), delay);
 }
 
+function syncEditorFromWidget(node) {
+  const state = node[STATE];
+  if (!state?.view || !state.sourceWidget) return;
+  const source = String(state.sourceWidget.value ?? "");
+  const current = state.view.state.doc.toString();
+  if (source === current) return;
+  state.view.dispatch({ changes: { from: 0, to: current.length, insert: source } });
+}
+
 function install(node) {
   if (node[STATE]) return;
 
@@ -540,6 +551,7 @@ app.registerExtension({
   loadedGraphNode(node) {
     if (node.comfyClass === FLOW_CLASS) {
       install(node);
+      syncEditorFromWidget(node);
       scheduleAnalyze(node, 0);
     }
   },

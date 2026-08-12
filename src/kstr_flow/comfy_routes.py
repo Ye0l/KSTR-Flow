@@ -28,13 +28,18 @@ async def kstr_flow_registry(request):
                 declared = value[0] if isinstance(value, (list, tuple)) and value else "*"
                 config = value[1] if isinstance(value, (list, tuple)) and len(value) > 1 and isinstance(value[1], dict) else {}
                 is_combo = isinstance(declared, (list, tuple))
+                combo_values = list(declared) if is_combo else None
+                # Model/LoRA selectors can contain thousands of values. Shipping all
+                # of those just to complete node names would recreate /object_info's
+                # multi-megabyte payload. Small enums remain useful for hints.
                 inputs.append({
                     "name": name,
                     "type": "COMBO" if is_combo else (declared if isinstance(declared, str) else "*"),
                     "optional": group == "optional",
                     "has_default": "default" in config,
                     "default": config.get("default"),
-                    "options": list(declared) if is_combo else None,
+                    "options": combo_values if combo_values is not None and len(combo_values) <= 128 else None,
+                    "option_count": len(combo_values) if combo_values is not None else None,
                     "tooltip": config.get("tooltip"),
                     "advanced": bool(config.get("advanced", False)),
                 })
