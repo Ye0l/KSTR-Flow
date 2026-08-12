@@ -21,10 +21,12 @@ async def kstr_flow_registry(request):
     registry = get_runtime_registry()
     packs: dict[str, list[dict]] = {}
     for raw_name, meta in registry.metadata.items():
-        info = meta.info
+        info = meta.info or {}
+        input_info = info.get("input") or {}
         inputs = []
         for group in ("required", "optional"):
-            for name, value in info.get("input", {}).get(group, {}).items():
+            group_inputs = input_info.get(group) or {}
+            for name, value in group_inputs.items():
                 declared = value[0] if isinstance(value, (list, tuple)) and value else "*"
                 config = value[1] if isinstance(value, (list, tuple)) and len(value) > 1 and isinstance(value[1], dict) else {}
                 is_combo = isinstance(declared, (list, tuple))
@@ -43,22 +45,30 @@ async def kstr_flow_registry(request):
                     "tooltip": config.get("tooltip"),
                     "advanced": bool(config.get("advanced", False)),
                 })
+        output_types = info.get("output") or []
+        output_names = info.get("output_name") or output_types
+        aliases = info.get("search_aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        else:
+            try:
+                aliases = list(aliases)
+            except TypeError:
+                aliases = []
+
         packs.setdefault(meta.namespace, []).append({
             "name": raw_name,
-            "display_name": info.get("display_name", raw_name),
-            "description": info.get("description", ""),
-            "category": info.get("category", ""),
+            "display_name": info.get("display_name") or raw_name,
+            "description": info.get("description") or "",
+            "category": info.get("category") or "",
             "inputs": inputs,
             "outputs": [
                 {"name": name, "type": typ}
-                for name, typ in zip(
-                    info.get("output_name", info.get("output", [])),
-                    info.get("output", []),
-                )
+                for name, typ in zip(output_names, output_types)
             ],
             "deprecated": bool(info.get("deprecated", False)),
             "experimental": bool(info.get("experimental", False)),
-            "search_aliases": list(info.get("search_aliases", [])),
+            "search_aliases": aliases,
         })
     for nodes in packs.values():
         nodes.sort(key=lambda item: item["name"].lower())
