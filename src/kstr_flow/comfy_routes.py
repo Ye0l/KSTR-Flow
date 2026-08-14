@@ -40,7 +40,7 @@ async def kstr_flow_preview(request):
             timeout=5.0,
         )
         return web.json_response({"ok": True, "graph": graph, "graph_error": None})
-    except TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         return web.json_response(
             {"ok": False, "graph": None, "graph_error": "Preview compilation timed out after 5s"},
             status=504,

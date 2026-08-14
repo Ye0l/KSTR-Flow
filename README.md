@@ -6,6 +6,8 @@ KSTR Flow embeds a Python-like editor in ComfyUI. Installed ComfyUI nodes are ex
 
 > Status: early prototype. The core language, dynamic I/O, autocomplete, graph preview, and ComfyUI expansion path are implemented. Real-world ComfyUI smoke testing is still in progress.
 
+> The `KSTRFlow` node now also ships inside [ComfyUI-KSTR-Nodes](https://github.com/Ye0l/ComfyUI-KSTR-Nodes). Install one or the other, not both: they register the same node ID and the same `/kstr-flow/*` endpoints.
+
 ## Install for testing
 
 Use the same Python environment that runs ComfyUI.

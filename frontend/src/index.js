@@ -23,7 +23,7 @@ import {
 import { tags } from "@lezer/highlight";
 
 const FLOW_CLASS = "KSTRFlow";
-const FRONTEND_BUILD = "2026-08-12.2253";
+const FRONTEND_BUILD = "2026-08-14.1";
 const STATE = Symbol("kstrFlowState");
 const ROOT_STATE = Symbol("kstrFlowRootState");
 const STATIC_INPUTS = new Set(["source", "global_seed"]);
@@ -965,6 +965,15 @@ function renderPreview(state) {
     preview.append(error);
     return;
   }
+  if (!analysis.graph && analysis.graph_error) {
+    // No graph at all means the compile probe itself failed. Show why instead of
+    // the "no Comfy nodes" message, which reads like the source is empty.
+    const failed = document.createElement("div");
+    failed.textContent = `Graph preview failed\n${analysis.graph_error}`;
+    Object.assign(failed.style, { color: "#e0a96d", font: "12px ui-monospace,monospace", whiteSpace: "pre-wrap" });
+    preview.append(failed);
+    return;
+  }
   renderGraph(preview, analysis.graph);
   if (analysis.graph_error) {
     const warning = document.createElement("div");
@@ -1174,12 +1183,51 @@ async function fetchJsonBounded(path, source, signal, timeoutMs, label) {
     ]);
     if (!response.ok) {
       const body = await response.text().catch(() => "");
+      let payload = null;
+      try { payload = JSON.parse(body); } catch { payload = null; }
+      // The preview endpoint answers a compile timeout with 504 plus a structured
+      // body. Surface that message instead of a bare HTTP status line.
+      if (payload && typeof payload === "object" && ("ok" in payload || "graph_error" in payload)) return payload;
       throw new Error(`${label} HTTP ${response.status}${body ? `: ${body.slice(0, 240)}` : ""}`);
     }
     return await response.json();
   } finally {
     timeout.cancel();
   }
+}
+
+function applyDiagnostics(state, diagnostics) {
+  const view = state.view;
+  if (!view) return;
+  try {
+    // setDiagnostics() builds a TransactionSpec from an EditorState; it does not
+    // apply anything by itself and it reads `state.field`, which an EditorView
+    // does not have. Passing the view threw before the preview was ever fetched.
+    view.dispatch(setDiagnostics(view.state, diagnostics));
+  } catch (error) {
+    console.warn("[KSTR Flow] could not update editor diagnostics", error);
+  }
+}
+
+async function fetchGraphPreview(node, state, source, signal, generation) {
+  setPreviewStatus(state, "preview: request");
+  try {
+    const preview = await fetchJsonBounded("/kstr-flow/preview", source, signal, 7000, "Preview");
+    if (generation !== state.generation) return;
+    state.analysis.graph = preview.graph ?? null;
+    state.analysis.graph_error = preview.graph_error ?? null;
+    setPreviewStatus(state, preview.ok === false ? "preview error" : "ready");
+  } catch (error) {
+    if (generation !== state.generation || signal.aborted) return;
+    // The source can be perfectly valid while only the compile probe fails, so a
+    // preview failure is reported in the preview pane and never as a code error.
+    state.analysis.graph = null;
+    state.analysis.graph_error = String(error?.message ?? error);
+    setPreviewStatus(state, "preview error");
+    console.error("[KSTR Flow] graph preview failed", error);
+  }
+  renderPreview(state);
+  node.setDirtyCanvas?.(true, true);
 }
 
 async function analyzeState(node, state) {
@@ -1203,40 +1251,32 @@ async function analyzeState(node, state) {
     state.analysis = result;
     state.error = result.ok ? null : result.error;
     if (!result.ok) {
-      setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
+      applyDiagnostics(state, errorDiagnostic(state.view, state.error));
       setPreviewStatus(state, "syntax error");
       renderPreview(state);
       return;
     }
 
-    syncInputs(node, result.inputs ?? []);
-    syncOutputs(node, result.outputs ?? []);
-    setDiagnostics(state.view, []);
-    setPreviewStatus(state, "preview: request");
+    applyDiagnostics(state, []);
+    // Socket sync talks to LiteGraph, whose API differs between Comfy frontends.
+    // Keep any failure there out of the graph preview path.
+    try {
+      syncInputs(node, result.inputs ?? []);
+      syncOutputs(node, result.outputs ?? []);
+    } catch (error) {
+      console.error("[KSTR Flow] could not sync dynamic sockets", error);
+    }
 
-    const preview = await fetchJsonBounded(
-      "/kstr-flow/preview", source, requestController.signal, 7000, "Preview"
-    );
-    if (generation !== state.generation) return;
-    state.analysis.graph = preview.graph ?? null;
-    state.analysis.graph_error = preview.graph_error ?? null;
-    setPreviewStatus(state, preview.ok ? "ready" : "preview error");
-    renderPreview(state);
-    node.setDirtyCanvas?.(true, true);
+    await fetchGraphPreview(node, state, source, requestController.signal, generation);
   } catch (error) {
-    if (generation !== state.generation) return;
+    if (generation !== state.generation || requestController.signal.aborted) return;
     const message = String(error?.message ?? error);
     state.error = { message, line: 1, column: 1 };
-    if (!state.analysis) {
-      state.analysis = { ok: false, error: state.error, graph: null, graph_error: null, symbols: {} };
-    } else {
-      state.analysis.graph = null;
-      state.analysis.graph_error = message;
-    }
-    setDiagnostics(state.view, errorDiagnostic(state.view, state.error));
+    state.analysis = { ok: false, error: state.error, graph: null, graph_error: null, symbols: {} };
+    applyDiagnostics(state, errorDiagnostic(state.view, state.error));
     setPreviewStatus(state, "error");
     renderPreview(state);
-    console.error("[KSTR Flow] analysis/preview failed", error);
+    console.error("[KSTR Flow] analysis failed", error);
   } finally {
     if (state.analyzeController === requestController) state.analyzeController = null;
   }
